@@ -21,16 +21,16 @@ pub(crate) const HEADER_OBJECT_COUNT_SHIFT: u32 = 12;
 // Type, Extended and NDO combined, ignoring roles, revision and MessageID (Table 6.2).
 pub(crate) const HEADER_KIND_COUNT_MASK: u16 = 0xf01f;
 // Type plus Extended, ignoring NDO (Table 6.2).
-
+pub(crate) const HEADER_KIND_MASK: u16 = HEADER_TYPE_MASK | HEADER_EXTENDED;
 // Specification Revision bits 7..6 and PD2 encoding (Table 6.2).
 pub(crate) const HEADER_REVISION_MASK: u16 = 0x00c0;
 pub(crate) const HEADER_REVISION_SHIFT: u32 = 6;
 pub(crate) const HEADER_PD2_REVISION: u16 = 0x0040;
 // Everything except MessageID; used to match exact Sink/UFP responses (Table 6.2).
-
+pub(crate) const HEADER_WITHOUT_ID_MASK: u16 = 0xf1ff;
 // Extended Header Chunked, Request Chunk and Data Size fields (Table 6.48).
 pub(crate) const EXTENDED_CHUNKED: u16 = 0x8000;
-
+pub(crate) const EXTENDED_REQUEST_CHUNK: u16 = 0x0400;
 pub(crate) const EXTENDED_SIZE_MASK: u16 = 0x01ff;
 // Chunk Number and Request Chunk must be clear for a complete single Chunk (Table 6.48).
 pub(crate) const EXTENDED_INCOMPLETE_MASK: u16 = 0x7c00;
@@ -43,11 +43,13 @@ pub(crate) const AVS_PDO_VOLTAGE_UNIT_MV: u32 = 100;
 pub(crate) const PPS_RDO_VOLTAGE_UNIT_MV: u32 = 20;
 pub(crate) const PPS_CURRENT_UNIT_MA: u32 = 50;
 // Millivolts times milliamperes per watt, from SI unit conversion.
-
+pub(crate) const MV_MA_PER_WATT: u32 = 1_000_000;
 // vSafe5V and SPR fixed/PPS voltage and power ceilings (sections 6.4.1 and 3.4.2).
-
+pub(crate) const VSAFE5V_MV: u32 = 5_000;
+pub(crate) const SPR_FIXED_MAX_MV: u32 = 20_000;
+pub(crate) const SPR_PPS_MAX_MV: u32 = 21_000;
 pub(crate) const SPR_MAX_W: u32 = 100;
 // Lowest SPR PPS output voltage encodable for this profile (Table 6.13).
-
+pub(crate) const SPR_PPS_MIN_MV: u32 = 3_300;
 // Reflected IEEE CRC-32 polynomial used by PD packets (section 5.3.1.1.4).
 pub(crate) const CRC32_POLYNOMIAL: u32 = 0xedb8_8320;
