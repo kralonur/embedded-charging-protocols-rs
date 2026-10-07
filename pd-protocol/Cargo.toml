@@ -1,0 +1,10 @@
+[package]
+name = "pd-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Allocation-free USB PD negotiation and cable inspection with caller-owned policy and transport."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+usbpd.workspace = true
+usbpd-traits.workspace = true
