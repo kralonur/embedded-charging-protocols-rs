@@ -96,6 +96,14 @@ pub trait Limits {
     const SINK_POWER_MODES: u8;
     const FIXED_TARGETS: &'static [u16];
     const PPS_REFRESH_MS: u64;
+    /// Ask an EPR Mode capable Source for EPR_Source_Capabilities, only on the
+    /// caller's request ([`Selection::request_epr_offer`]). NOT STANDARD
+    /// (section 6.5.14.1): EPR_Get_Source_Cap is for EPR capable Sinks. The
+    /// answer is informational only: this port stays in SPR Mode and never
+    /// sends EPR_Request. The answer spans Chunks, so this also enables the
+    /// chunking layer: another multi-Chunk Message then fails closed at the
+    /// gates instead of getting Not_Supported (section 7.31.15).
+    const EPR_OFFER: bool = false;
     /// Truthful current SOP Status (Table 6.51), or no responder support.
     /// A provider must keep its snapshot stable during a transmission.
     fn status() -> Option<[u8; 7]> {
@@ -153,6 +161,84 @@ const SKEDB_RESPONSE_HEADER: u16 = 0xf08f;
 const STATUS_RESPONSE_HEADER: u16 = 0xb082;
 const ALERT_RESPONSE_HEADER: u16 = 0x1086;
 const PPS_STATUS_RESPONSE_HEADER: u16 = 0xa00c;
+/// EPR_Get_Source_Cap header bits checked by both gates (`& 0xf1ff`): Extended,
+/// one Data Object, PD3, Sink/UFP, Extended_Control (Tables 6.2, 6.47).
+pub const EPR_GET_SOURCE_CAP_HEADER: u16 = 0x9090;
+/// Its Extended Header (Chunked, Data Size 2) and ECDB (Type 1
+/// EPR_Get_Source_Cap, Data 0), little-endian (Tables 6.48, 6.66, 6.67).
+pub const EPR_GET_SOURCE_CAP_BODY: [u8; 4] = [0x02, 0x80, 0x01, 0x00];
+/// Chunk request header bits for EPR_Source_Capabilities (`& 0xf1ff`):
+/// Extended, one Data Object, PD3, Sink/UFP, type 10001b (section 6.12.2.1.2.4).
+pub const EPR_CHUNK_REQUEST_HEADER: u16 = 0x9091;
+/// EPR_Source_Capabilities: Extended plus type 10001b (Table 6.47).
+pub const EPR_SOURCE_CAPABILITIES_KIND: u16 = 0x8011;
+/// EPR Capabilities: the 5V Fixed Supply PDO and up to 10 more (section 6.5.15).
+pub const EPR_OBJECTS: usize = 11;
+
+/// Extended Header of a request for Chunk `chunk`: Chunked, Request Chunk,
+/// Data Size 0 (Table 6.48); 00h padding completes the Data Object.
+pub const fn epr_chunk_request(chunk: u8) -> [u8; 4] {
+    let header = EXTENDED_CHUNKED | EXTENDED_REQUEST_CHUNK | ((chunk as u16) << 11);
+    let [low, high] = header.to_le_bytes();
+    [low, high, 0, 0]
+}
+
+/// A received Chunk of the EPR_Source_Capabilities answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EprChunk {
+    /// More follow: request this Chunk next.
+    Next(u8),
+    Last,
+}
+
+/// Chunk `chunk` of the expected EPR_Source_Capabilities answer, for a Data
+/// Block that fits [`EPR_OBJECTS`] (Table 6.48, sections 6.5.15, 6.12.2.1.2);
+/// `None` when `bytes` are not exactly that Chunk.
+pub fn epr_chunk(bytes: &[u8], chunk: u8) -> Option<EprChunk> {
+    let [h0, h1, e0, e1, ..] = *bytes else {
+        return None;
+    };
+    let header = u16::from_le_bytes([h0, h1]);
+    let extended = u16::from_le_bytes([e0, e1]) & EXTENDED_DEFINED_FIELDS_MASK;
+    let objects = ((header & HEADER_OBJECT_COUNT_MASK) >> HEADER_OBJECT_COUNT_SHIFT) as usize;
+    let size = (extended & EXTENDED_SIZE_MASK) as usize;
+    let start = usize::from(chunk) * usize::from(MAX_CHUNK_BYTES);
+    let carried = size.saturating_sub(start).min(usize::from(MAX_CHUNK_BYTES));
+    if header & HEADER_KIND_MASK != EPR_SOURCE_CAPABILITIES_KIND
+        || (header & HEADER_REVISION_MASK) >> HEADER_REVISION_SHIFT != 2
+        || extended & !EXTENDED_SIZE_MASK != EXTENDED_CHUNKED | (u16::from(chunk) << 11)
+        || size == 0
+        || size > EPR_OBJECTS * OBJECT_BYTES
+        || !size.is_multiple_of(OBJECT_BYTES)
+        || carried == 0
+        || objects != (EXTENDED_HEADER_BYTES + carried).div_ceil(OBJECT_BYTES)
+        || bytes.len() != HEADER_BYTES + objects * OBJECT_BYTES
+    {
+        return None;
+    }
+    Some(if start + carried < size {
+        EprChunk::Next(chunk + 1)
+    } else {
+        EprChunk::Last
+    })
+}
+
+/// The Source's EPR offer in this session (EPR_Get_Source_Cap, section 6.5.14.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EprOffer {
+    NotAsked,
+    /// Requested; sent when Ready next allows.
+    Asked,
+    /// EPR_Source_Capabilities object positions 1 to 11 as received; 0 is
+    /// padding or absent (section 6.5.15.1).
+    Received([u32; EPR_OBJECTS]),
+    /// No answer before SenderResponseTimer, or the AMS was interrupted.
+    NoAnswer,
+    /// Deferred `query_max_deferrals` times: the line never allowed the AMS
+    /// start (SinkTxNG or a Source Message first, sections 7.2, 7.3).
+    NotSent,
+}
+
 // Single Chunk 0 headers for 24-byte SKEDB and 4-byte PPSSDB (Table 6.48).
 const SKEDB_CHUNK_HEADER: [u8; 2] = [0x18, 0x80];
 const PPS_STATUS_CHUNK_HEADER: u16 = 0x8004;
@@ -850,6 +936,10 @@ pub struct Selection<L: Limits> {
     sink_alert_armed: Cell<Option<u32>>,
     sink_alert_deferred: Cell<bool>,
     partner: Cell<PartnerInfo>,
+    // The Source's first PDO set EPR Mode Capable (Table 6.9), and its EPR offer.
+    epr_capable: Cell<bool>,
+    epr_offer: Cell<EprOffer>,
+    epr_deferrals: Cell<u8>,
     waker: RefCell<Option<Waker>>,
 }
 impl<L: Limits> Selection<L> {
@@ -889,6 +979,9 @@ impl<L: Limits> Selection<L> {
             sink_alert_armed: Cell::new(None),
             sink_alert_deferred: Cell::new(false),
             partner: Cell::new(PartnerInfo::PENDING),
+            epr_capable: Cell::new(false),
+            epr_offer: Cell::new(EprOffer::NotAsked),
+            epr_deferrals: Cell::new(0),
             waker: RefCell::new(None),
         }
     }
@@ -920,6 +1013,8 @@ impl<L: Limits> Selection<L> {
         self.cable_result.set(None);
         self.pps_status.set(None);
         self.partner.set(PartnerInfo::PENDING);
+        self.epr_capable.set(false);
+        self.epr_offer.set(EprOffer::NotAsked);
         self.query_index.set(0);
         self.query_deferrals.set(0);
         self.status_requested.set(false);
@@ -1063,6 +1158,43 @@ impl<L: Limits> Selection<L> {
     pub fn partner_info(&self) -> PartnerInfo {
         self.partner.get()
     }
+    /// The Source advertised EPR Mode Capable in its first PDO.
+    pub fn epr_capable(&self) -> bool {
+        self.epr_capable.get()
+    }
+    pub fn epr_offer(&self) -> EprOffer {
+        self.epr_offer.get()
+    }
+    /// Ask for the Source's EPR offer once more, from an established PD3
+    /// contract with an EPR Mode capable Source ([`Limits::EPR_OFFER`]).
+    /// False means nothing was asked.
+    pub fn request_epr_offer(&self) -> bool {
+        if !L::EPR_OFFER
+            || !self.epr_capable.get()
+            || self.peer_revision.get() != 2
+            || self.established.get().is_none()
+            || self.epr_offer.get() == EprOffer::Asked
+        {
+            return false;
+        }
+        self.epr_offer.set(EprOffer::Asked);
+        self.epr_deferrals.set(0);
+        if let Some(waker) = self.waker.borrow().as_ref() {
+            waker.wake_by_ref();
+        }
+        true
+    }
+    /// The EPR offer request is due: asked, an idle PD3 contract and no user
+    /// change, refresh, cooldown or cable inspection.
+    fn epr_offer_due(&self) -> bool {
+        self.epr_offer.get() == EprOffer::Asked
+            && !self.waiting()
+            && !self.request_in_flight.get()
+            && !self.has_pending()
+            && !self.cable_active.get()
+            && self.peer_revision.get() == 2
+            && self.established.get().is_some()
+    }
     /// Record a final outcome of the current request and move to the next.
     fn finish_query(&self, query: PartnerQuery, outcome: Answer<()>) {
         let mut partner = self.partner.get();
@@ -1200,6 +1332,7 @@ impl<L: Limits> Selection<L> {
                 }
             }
         }
+        self.epr_capable.set(capabilities.epr_mode_capable());
         self.options.set(options);
         self.pps_max.set(pps_max);
         self.pps_max_ma.set(pps_max_ma);
@@ -1413,6 +1546,11 @@ struct State<'a, L: Limits> {
     // An information request armed by policy, and sent and not yet answered.
     query: Option<PartnerQuery>,
     query_pending: Option<PartnerQuery>,
+    // EPR_Get_Source_Cap armed by policy, sent and not yet answered, and the
+    // answer's Chunk expected next.
+    epr_query: bool,
+    epr_pending: bool,
+    epr_chunk: u8,
     selected: Option<Contract>,
     established: Option<Contract>,
     outcome: Option<Result<Contract, Error>>,
@@ -1450,6 +1588,9 @@ impl<L: Limits> State<'_, L> {
             }
         }
         self.selected = self.established.clone();
+        let interrupted_epr =
+            core::mem::take(&mut self.epr_query) | core::mem::take(&mut self.epr_pending);
+        self.epr_chunk = 0;
         let interrupted_query = core::mem::take(&mut self.pps_status_pending);
         self.query = None;
         let interrupted_request = self.query_pending.take();
@@ -1461,6 +1602,9 @@ impl<L: Limits> State<'_, L> {
             if let Some(query) = interrupted_request {
                 // Nor an interrupted information request.
                 selection.finish_query(query, Answer::Interrupted);
+            }
+            if interrupted_epr {
+                selection.epr_offer.set(EprOffer::NoAnswer);
             }
             selection.pending.set(None);
             selection.cable_pending.set(false);
@@ -1557,6 +1701,9 @@ impl<L: Limits> Trial<L> {
             pps_status_pending: false,
             query: None,
             query_pending: None,
+            epr_query: false,
+            epr_pending: false,
+            epr_chunk: 0,
             selected: None,
             established: None,
             outcome: None,
@@ -1654,6 +1801,9 @@ impl<L: Limits> Trial<L> {
             pps_status_pending: false,
             query: None,
             query_pending: None,
+            epr_query: false,
+            epr_pending: false,
+            epr_chunk: 0,
             selected: None,
             established: None,
             outcome: None,
@@ -1692,8 +1842,8 @@ struct Policy<'a, 'b, L: Limits> {
     shared: &'a RefCell<State<'b, L>>,
 }
 impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
-    // No reviewed need to receive any multi-Chunk Message (section 7.31.15).
-    const CHUNKING: bool = false;
+    // Only EPR_Source_Capabilities needs the chunking layer (`Limits::EPR_OFFER`).
+    const CHUNKING: bool = L::EPR_OFFER;
     // Fixed/PPS SPR only; the profile does not support EPR.
     const EPR: bool = false;
 
@@ -2015,11 +2165,37 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
         }
     }
 
+    // PE_SNK_Get_Source_Cap exit with EPR_Source_Capabilities, in SPR Mode:
+    // informational only, no EPR_Request (section 6.5.14.1).
+    async fn inform(&mut self, capabilities: &source_capabilities::SourceCapabilities) {
+        let mut state = self.shared.borrow_mut();
+        if !core::mem::take(&mut state.epr_pending) {
+            return;
+        }
+        state.epr_chunk = 0;
+        if let Some(selection) = state.selection {
+            let mut objects = [0; EPR_OBJECTS];
+            for (object, pdo) in objects.iter_mut().zip(capabilities.pdos()) {
+                *object = pdo.to_raw();
+            }
+            selection.epr_offer.set(EprOffer::Received(objects));
+        }
+    }
+
     async fn get_event(&mut self, capabilities: &source_capabilities::SourceCapabilities) -> Event {
         let Some(selection) = self.shared.borrow().selection else {
             return pending().await;
         };
         selection.advertise(capabilities);
+        {
+            // PE_SNK_Get_Source_Cap ended back in Ready without the answer
+            // (SenderResponseTimer, section 8.3.3.3.12).
+            let mut state = self.shared.borrow_mut();
+            if core::mem::take(&mut state.epr_query) | core::mem::take(&mut state.epr_pending) {
+                state.epr_chunk = 0;
+                selection.epr_offer.set(EprOffer::NoAnswer);
+            }
+        }
         poll_fn(|cx| {
             *selection.waker.borrow_mut() = Some(cx.waker().clone());
             if !selection.rx_idle.get() || selection.waiting() {
@@ -2070,6 +2246,19 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
                     state.pps_status_query = true;
                     selection.set_rx_idle(false);
                     return Poll::Ready(Event::GetPpsStatus);
+                }
+                None if selection.epr_offer_due() => {
+                    let mut state = self.shared.borrow_mut();
+                    if state.established.is_none()
+                        || state.query_pending.is_some()
+                        || state.pps_status_pending
+                    {
+                        return Poll::Pending;
+                    }
+                    state.epr_query = true;
+                    state.epr_chunk = 0;
+                    selection.set_rx_idle(false);
+                    return Poll::Ready(Event::RequestEprSourceCapabilities);
                 }
                 None if selection.query_due() => {
                     let mut state = self.shared.borrow_mut();
@@ -2445,6 +2634,32 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                     && state.partner_revision == 2
                     && state.established.is_some()
             });
+        // EPR_Get_Source_Cap only as armed by policy, once, from an idle PD3
+        // contract (`Limits::EPR_OFFER`): exactly its bytes.
+        let is_epr_request = bytes.len() == 6 && {
+            let state = self.shared.borrow();
+            let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+            state.mode == Mode::Maintained
+                && state.epr_query
+                && state.query_pending.is_none()
+                && !state.pps_status_pending
+                && !state.request_in_flight
+                && state.reset == Reset::Idle
+                && !state.caps_reply
+                && state.partner_revision == 2
+                && state.established.is_some()
+                && header & HEADER_WITHOUT_ID_MASK == EPR_GET_SOURCE_CAP_HEADER
+                && bytes[2..] == EPR_GET_SOURCE_CAP_BODY
+        };
+        // The chunking layer's request for the next Chunk of that answer.
+        let is_epr_chunk_request = bytes.len() == 6 && {
+            let state = self.shared.borrow();
+            let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+            state.epr_pending
+                && state.epr_chunk > 0
+                && header & HEADER_WITHOUT_ID_MASK == EPR_CHUNK_REQUEST_HEADER
+                && bytes[2..] == epr_chunk_request(state.epr_chunk)
+        };
         let is_reset_accept = self.shared.borrow().reset == Reset::Accept
             && bytes.len() == 2
             && u16::from_le_bytes([bytes[0], bytes[1]])
@@ -2470,6 +2685,7 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
         let ams_start = is_sink_alert
             || is_pps_status_query
             || query_request.is_some()
+            || is_epr_request
             || is_request && mode == Mode::Maintained && {
                 let state = self.shared.borrow();
                 state.established.is_some() && !state.caps_reply && state.reset == Reset::Idle
@@ -2506,6 +2722,10 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                 state.pps_status_pending = true;
             } else if let Some(query) = query_request {
                 state.query_pending = Some(query);
+            } else if is_epr_request {
+                state.epr_query = false;
+                state.epr_pending = true;
+            } else if is_epr_chunk_request {
             } else if is_reset_accept {
                 state.reset = Reset::Capabilities;
                 state.recovering = true;
@@ -2549,6 +2769,22 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
         }
         match self.driver.transmit(bytes).await {
             Ok(()) => Ok(()),
+            // Unsent: the engine is back in Ready. Asked again after the
+            // caller's cooldown, up to its unsent-attempt limit.
+            Err(DriverTxError::Deferred) if is_epr_request => {
+                let mut state = self.shared.borrow_mut();
+                state.epr_pending = false;
+                if let Some(selection) = state.selection {
+                    let deferrals = selection.epr_deferrals.get() + 1;
+                    if deferrals < L::SESSION_POLICY.query_max_deferrals {
+                        selection.epr_deferrals.set(deferrals);
+                        selection.cool_down();
+                    } else {
+                        selection.epr_offer.set(EprOffer::NotSent);
+                    }
+                }
+                Err(DriverTxError::Deferred)
+            }
             Err(DriverTxError::Deferred) if ams_start => {
                 let state = self.shared.borrow();
                 if is_sink_alert || is_pps_status_query || query_request.is_some() {
@@ -2559,6 +2795,10 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                     trace.re_requests_sent = trace.re_requests_sent.saturating_sub(1);
                 }
                 Err(DriverTxError::Deferred)
+            }
+            // This engine ends a failed Chunk request as a timeout, back in Ready.
+            Err(DriverTxError::NotAcknowledged) if is_epr_chunk_request => {
+                Err(DriverTxError::NotAcknowledged)
             }
             // No GoodCRC after the PHY's retries: a Protocol Error, except for the
             // reset Messages themselves, whose failure needs Hard Reset (section 7.1.1).
@@ -2756,6 +2996,49 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                 } else {
                     state.fail(Error::Peer);
                     false
+                };
+                if serviced && let Some(trace) = state.trace {
+                    trace.borrow_mut().packets_serviced += 1;
+                }
+                serviced
+            };
+            return if serviced {
+                Ok(length)
+            } else {
+                pending().await
+            };
+        }
+        if self.shared.borrow().epr_pending {
+            // PE_SNK_Get_Source_Cap for the EPR offer (section 8.3.3.3.12): only
+            // the expected Chunk of PD3 EPR_Source_Capabilities. Not_Supported or
+            // another well-formed Message at this revision is answered with
+            // Soft_Reset by this engine, so it is a Protocol Error here. A new
+            // Source_Capabilities would end the AMS unanswered and a malformed
+            // answer is not trusted: both fail closed.
+            let serviced = {
+                let mut state = self.shared.borrow_mut();
+                let chunk = state.epr_chunk;
+                let kind = header & HEADER_KIND_MASK;
+                let serviced = match epr_chunk(&buffer[..length], chunk) {
+                    Some(EprChunk::Next(next)) => {
+                        state.epr_chunk = next;
+                        true
+                    }
+                    Some(EprChunk::Last) => {
+                        state.epr_chunk = 0;
+                        true
+                    }
+                    None if framed
+                        && same_revision
+                        && kind != EPR_SOURCE_CAPABILITIES_KIND
+                        && kind != DataMessageType::SourceCapabilities as u16 =>
+                    {
+                        state.protocol_error()
+                    }
+                    None => {
+                        state.fail(Error::Peer);
+                        false
+                    }
                 };
                 if serviced && let Some(trace) = state.trace {
                     trace.borrow_mut().packets_serviced += 1;

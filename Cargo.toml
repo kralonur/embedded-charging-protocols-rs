@@ -5,5 +5,5 @@ resolver = "3"
 [workspace.dependencies]
 # Reviewed sink improvements from feat/sink-protocol-improvements.
 # Direct pins keep the engine and adapters on one Driver trait identity.
-usbpd = { git = "https://github.com/kralonur/usbpd", rev = "326123330125a74cfc75bc58a6d81e34fba97f4b" }
-usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "326123330125a74cfc75bc58a6d81e34fba97f4b" }
+usbpd = { git = "https://github.com/kralonur/usbpd", rev = "13e747ed116874d30ac54b58ff6d104cbe6b9ec3" }
+usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "13e747ed116874d30ac54b58ff6d104cbe6b9ec3" }

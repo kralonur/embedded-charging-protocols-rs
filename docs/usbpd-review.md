@@ -34,8 +34,14 @@ message and sink-policy changes against the baseline:
   responses used by this wrapper, and escalates failed soft-reset recovery.
 
 The extracted guard independently checks outgoing RDOs/responses and incoming
-framing, disables EPR/chunk assembly, requires automatic GoodCRC and retries,
-blocks optional recovery, and ends after mandatory Hard Reset signaling.
+framing, never enters EPR Mode, requires automatic GoodCRC and retries, blocks
+optional recovery, and ends after mandatory Hard Reset signaling. Chunk assembly
+stays off unless the caller sets `Limits::EPR_OFFER`: then an explicit request
+sends EPR_Get_Source_Cap from Ready (not standard for a Sink without EPR Mode,
+section 6.5.14.1) and the answer is informational only. With it, another
+multi-Chunk Message fails closed instead of getting Not_Supported. A Deferred
+EPR_Get_Source_Cap returns to Ready and is asked again after the caller's
+cooldown, up to its unsent-attempt limit.
 
 ## Constraints, not general approval
 
