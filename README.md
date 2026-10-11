@@ -35,7 +35,7 @@ packet inspector:
   ratings.
 
 The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
-3.0 sink side:
+3.0 sink side, and reads requests another device drives:
 
 - **Entry handshake:** times the D+ hold and checks the D− response, telling a
   Quick Charge charger from a plain dedicated charging port or no charger.
@@ -45,6 +45,9 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
 - **Quick Charge 3.0 steps:** continuous mode and the 200 mV up/down pulses.
 - **Output checks:** whether the measured output followed a request, and a
   probe that reports which voltages, class and steps a charger takes.
+- **Request reading:** the Quick Charge 2.0 voltage or 3.0 continuous mode a
+  pair of measured D+/D− voltages asks for, as a charger reads it, for
+  watching a device that drives Quick Charge itself.
 
 ## Limitations
 
@@ -53,7 +56,8 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
 - **Quick Charge from public sources:** Qualcomm does not publish the
   specification. Levels and timings come from the USB Battery Charging
   Specification 1.2 and Quick Charge charger IC datasheets, cited in
-  `qc-protocol/src/qc2.rs` and `qc-protocol/src/qc3.rs`. They give no
+  `qc-protocol/src/qc2.rs`, `qc-protocol/src/qc3.rs` and
+  `qc-protocol/src/lines.rs`. They give no
   device-side pulse widths, so the crate picks one inside the charger's
   filter limits.
 - **Sink only:** no source role, and no power role, data role or VCONN swap.

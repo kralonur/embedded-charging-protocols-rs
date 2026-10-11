@@ -7,5 +7,6 @@
 #![no_std]
 
 pub mod detect;
+pub mod lines;
 pub mod qc2;
 pub mod qc3;

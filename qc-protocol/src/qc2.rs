@@ -48,7 +48,7 @@ pub enum Level {
 impl Level {
     /// The level every charger reads a measured line voltage as, or `None`
     /// inside a comparator's tolerance, where chargers may differ.
-    fn from_mv(mv: u16) -> Option<Self> {
+    pub(crate) fn from_mv(mv: u16) -> Option<Self> {
         if mv < VDAT_REF_MIN_MV {
             Some(Self::Low)
         } else if mv > VDAT_REF_MAX_MV && mv < VSEL_REF_MIN_MV {
@@ -168,11 +168,16 @@ impl Session {
     /// `(D+, D−)` levels to drive for `voltage` (CHY100 Table 1); it applies
     /// within [`REQUEST_SETTLE_MS`].
     pub fn request(&self, voltage: Voltage) -> (Level, Level) {
-        match voltage {
-            Voltage::V5 => (Level::Mid, Level::Low),
-            Voltage::V9 => (Level::High, Level::Mid),
-            Voltage::V12 => (Level::Mid, Level::Mid),
-            Voltage::V20 => (Level::High, Level::High),
-        }
+        levels(voltage)
+    }
+}
+
+/// `(D+, D−)` levels that request `voltage` (CHY100 Table 1).
+pub(crate) const fn levels(voltage: Voltage) -> (Level, Level) {
+    match voltage {
+        Voltage::V5 => (Level::Mid, Level::Low),
+        Voltage::V9 => (Level::High, Level::Mid),
+        Voltage::V12 => (Level::Mid, Level::Mid),
+        Voltage::V20 => (Level::High, Level::High),
     }
 }

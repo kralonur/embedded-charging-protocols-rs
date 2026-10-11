@@ -37,7 +37,7 @@ pub enum Step {
 }
 
 /// Levels between pulses (NCP4371 Table 4; CHY103 Table 1).
-const HOLD: (Level, Level) = (Level::Mid, Level::High);
+pub(crate) const HOLD: (Level, Level) = (Level::Mid, Level::High);
 
 /// Proof continuous mode was requested in an entered session, so steps can
 /// be sent, and the output they have set.
