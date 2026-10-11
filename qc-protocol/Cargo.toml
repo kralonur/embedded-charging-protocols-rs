@@ -1,0 +1,8 @@
+[package]
+name = "qc-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Allocation-free Quick Charge 2.0 and 3.0 sink handshake, requests and output checks with caller-owned drivers and timing."
+license = "MIT OR Apache-2.0"
+
+[dependencies]

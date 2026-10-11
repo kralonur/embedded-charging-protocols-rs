@@ -7,9 +7,9 @@ hardware registers, GPIOs, ADC measurements or storage: the physical transport
 (PHY adapter), clocks and timers, operating limits and safety policy belong to
 the caller.
 
-> **Note:** only USB Power Delivery is implemented so far, as the
-> `pd-protocol` workspace member. Review the implementation and validate it on
-> your hardware before relying on it.
+> **Note:** USB Power Delivery (`pd-protocol`) and Quick Charge 2.0 and 3.0
+> (`qc-protocol`) are implemented so far. Review the implementation and
+> validate it on your hardware before relying on it.
 
 ## Features
 
@@ -34,10 +34,28 @@ packet inspector:
   and `Transport` traits; the library assumes no hidden timing or hardware
   ratings.
 
+The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
+3.0 sink side:
+
+- **Entry handshake:** times the D+ hold and checks the D− response, telling a
+  Quick Charge charger from a plain dedicated charging port or no charger.
+  Measured voltages are read against the charger's own comparator limits.
+- **Requests:** the D+/D− levels for 5, 9, 12 and 20 V, available only after a
+  completed handshake.
+- **Quick Charge 3.0 steps:** continuous mode and the 200 mV up/down pulses.
+- **Output checks:** whether the measured output followed a request, and a
+  probe that reports which voltages, class and steps a charger takes.
+
 ## Limitations
 
-- **USB PD only.** Proprietary and legacy fast-charging protocols are planned
-  as separate workspace members, not implemented.
+- **USB PD and Quick Charge 2.0/3.0 only.** Other proprietary and legacy
+  fast-charging protocols are planned as separate workspace members.
+- **Quick Charge from public sources:** Qualcomm does not publish the
+  specification. Levels and timings come from the USB Battery Charging
+  Specification 1.2 and Quick Charge charger IC datasheets, cited in
+  `qc-protocol/src/qc2.rs` and `qc-protocol/src/qc3.rs`. They give no
+  device-side pulse widths, so the crate picks one inside the charger's
+  filter limits.
 - **Sink only:** no source role, and no power role, data role or VCONN swap.
 - **No EPR mode:** the EPR offer can be read, but EPR mode is never entered and
   no EPR object is requested.

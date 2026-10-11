@@ -1,5 +1,5 @@
 [workspace]
-members = ["pd-protocol"]
+members = ["pd-protocol", "qc-protocol"]
 resolver = "3"
 
 [workspace.dependencies]
