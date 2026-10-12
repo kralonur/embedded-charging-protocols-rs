@@ -248,7 +248,7 @@ fn selectable_decline_preserves_contract_and_gates_confirmation() {
         assert!(selection.preview(pd_protocol::pd_spr::Target {
             mv: 9000,
             ma: 100,
-            pps_object: 0
+            supply: pd_spr::Supply::Fixed
         }));
         assert!(selection.confirm());
         assert!(engine.as_mut().poll(&mut cx).is_pending());
@@ -314,7 +314,7 @@ fn declined_change_keeps_established_pps_refresh_schedule() {
             assert!(selection.preview(pd_protocol::pd_spr::Target {
                 mv: 5000,
                 ma: 1000,
-                pps_object: 4
+                supply: pd_spr::Supply::Pps(4)
             }));
             assert!(selection.confirm());
             assert!(engine.as_mut().poll(&mut cx).is_pending());
@@ -334,13 +334,13 @@ fn declined_change_keeps_established_pps_refresh_schedule() {
                 pd_protocol::pd_spr::Target {
                     mv: 9000,
                     ma: 1000,
-                    pps_object: 4,
+                    supply: pd_spr::Supply::Pps(4),
                 }
             } else {
                 pd_protocol::pd_spr::Target {
                     mv: 9000,
                     ma: 100,
-                    pps_object: 0,
+                    supply: pd_spr::Supply::Fixed,
                 }
             };
             assert!(selection.preview(candidate));
@@ -399,7 +399,7 @@ fn rejected_established_pps_refresh_halts_without_repeating_it() {
     assert!(selection.preview(pd_protocol::pd_spr::Target {
         mv: 5000,
         ma: 1000,
-        pps_object: 4
+        supply: pd_spr::Supply::Pps(4)
     }));
     assert!(selection.confirm());
     assert!(engine.as_mut().poll(&mut cx).is_pending());
@@ -1038,7 +1038,7 @@ fn cancelled_session_revokes_work_and_fresh_session_forgets_old_state() {
             assert!(selection.preview(pd_protocol::pd_spr::Target {
                 mv: 5000,
                 ma: 1000,
-                pps_object: 4
+                supply: pd_spr::Supply::Pps(4)
             }));
             assert!(selection.confirm());
             assert!(engine.as_mut().poll(&mut cx).is_pending());
@@ -1050,7 +1050,7 @@ fn cancelled_session_revokes_work_and_fresh_session_forgets_old_state() {
             assert!(selection.preview(pd_protocol::pd_spr::Target {
                 mv: 9000,
                 ma: 100,
-                pps_object: 0
+                supply: pd_spr::Supply::Fixed
             }));
             assert!(selection.confirm());
             selection.set_now_ms(100_000);
@@ -1307,7 +1307,7 @@ fn bist_test_data_at_vsafe5v_sends_nothing_until_hard_reset() {
     assert!(selection.preview(pd_protocol::pd_spr::Target {
         mv: 9000,
         ma: 100,
-        pps_object: 0
+        supply: pd_spr::Supply::Fixed
     }));
     assert!(selection.confirm());
     state.borrow_mut().now = 10_000;
@@ -1798,7 +1798,7 @@ fn partner_soft_reset_preserves_pps_and_discards_queued_user_change() {
     assert!(selection.preview(pd_protocol::pd_spr::Target {
         mv: 5000,
         ma: 1000,
-        pps_object: 4
+        supply: pd_spr::Supply::Pps(4)
     }));
     assert!(selection.confirm());
     assert!(engine.as_mut().poll(&mut cx).is_pending());
@@ -1816,7 +1816,7 @@ fn partner_soft_reset_preserves_pps_and_discards_queued_user_change() {
     assert!(selection.preview(pd_protocol::pd_spr::Target {
         mv: 9000,
         ma: 100,
-        pps_object: 0
+        supply: pd_spr::Supply::Fixed
     }));
     assert!(selection.confirm());
     state.borrow_mut().rx.push_back(packet(13, 0, &[]));
@@ -1950,7 +1950,7 @@ fn changing_to_9v(
     assert!(selection.preview(pd_protocol::pd_spr::Target {
         mv: 9000,
         ma: 100,
-        pps_object: 0
+        supply: pd_spr::Supply::Fixed
     }));
     assert!(selection.confirm());
     assert!(poll().is_pending());
@@ -2271,7 +2271,7 @@ fn deferred_user_change_keeps_contract_and_needs_new_confirmation() {
     let nine = pd_protocol::pd_spr::Target {
         mv: 9000,
         ma: 100,
-        pps_object: 0,
+        supply: pd_spr::Supply::Fixed,
     };
     assert!(selection.preview(nine));
     assert!(selection.confirm());
@@ -2344,7 +2344,7 @@ fn deferred_pps_refresh_stays_due_and_is_retried_after_the_cooldown() {
     assert!(selection.preview(pd_protocol::pd_spr::Target {
         mv: 5000,
         ma: 1000,
-        pps_object: 4
+        supply: pd_spr::Supply::Pps(4)
     }));
     assert!(selection.confirm());
     assert!(engine.as_mut().poll(&mut cx).is_pending());
@@ -2415,7 +2415,7 @@ impl usbpd::timers::Timer for SenderResponseOnly {
 const PPS_5V: pd_protocol::pd_spr::Target = pd_protocol::pd_spr::Target {
     mv: 5000,
     ma: 1000,
-    pps_object: 4,
+    supply: pd_spr::Supply::Pps(4),
 };
 /// PPS_Status: Chunked, Chunk 0, Data Size 4; 9.00 V, 2.00 A, PTF normal, OMF CL.
 fn pps_status(id: u16) -> Vec<u8> {

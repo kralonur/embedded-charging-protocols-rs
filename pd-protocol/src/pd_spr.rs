@@ -1,4 +1,4 @@
-//! Reviewed fixed/PPS SPR requests using the pinned upstream sink policy engine.
+//! Reviewed fixed, PPS and SPR AVS requests using the pinned upstream sink policy engine.
 //!
 //! The caller's transport must provide CRC-validated ordinary SOP packets,
 //! verified automatic GoodCRC and bounded retries, and
@@ -64,7 +64,8 @@ pub struct SessionPolicy {
 }
 
 /// Caller-supplied request policy. No operating limits are chosen by the library.
-/// Only fixed SPR and SPR PPS are supported; this does not enable EPR/AVS.
+/// Fixed SPR and SPR PPS are supported, and SPR AVS when [`Limits::SPR_AVS`]
+/// is set; EPR is not.
 pub trait Limits {
     /// Identity advertised by this port, supplied explicitly by the caller.
     const SINK_IDENTITY: SinkIdentity;
@@ -104,6 +105,11 @@ pub trait Limits {
     /// chunking layer: another multi-Chunk Message then fails closed at the
     /// gates instead of getting Not_Supported (section 7.31.15).
     const EPR_OFFER: bool = false;
+    /// Request SPR AVS (PD3, section 6.4.1.3.10): advertise it in
+    /// Sink_Capabilities and the SKEDB, list the Source's SPR AVS ranges and
+    /// request them. The range ends at 20 V when `MAX_REQUEST_MV` allows it,
+    /// else at 15 V, else SPR AVS stays off (Table 4.3).
+    const SPR_AVS: bool = false;
     /// Truthful current SOP Status (Table 6.51), or no responder support.
     /// A provider must keep its snapshot stable during a transmission.
     fn status() -> Option<[u8; 7]> {
@@ -139,6 +145,10 @@ pub const SINK_ALERT_EVENTS: u32 = 0x7800_0000;
 // SPR PPS APDO discriminator: PDO kind and APDO type, bits 31..28 (Table 6.13).
 const PPS_APDO_TYPE_MASK: u32 = 0xf000_0000;
 const PPS_APDO_TYPE: u32 = 0xc000_0000;
+// SPR AVS APDO discriminator under the same mask (Table 6.15).
+const AVS_APDO_TYPE: u32 = 0xe000_0000;
+// SPR AVS APDO 15 V and 20 V Maximum Current fields (Table 6.15).
+const AVS_APDO_CURRENT_MASK: u32 = 0x3ff;
 // Fixed RDO current, PPS voltage/current and APDO voltage field widths (Tables 6.19, 6.21, 6.13).
 const FIXED_RDO_CURRENT_MASK: u32 = 0x3ff;
 const PPS_RDO_CURRENT_MASK: u32 = 0x7f;
@@ -439,8 +449,8 @@ pub fn bist_request(header: u16, bdo: u32, contract_object: u8) -> BistRequest {
 /// - Load Step 150 mA/us default, no overload/droop tolerance, no LPS/PS1/PS2
 ///   compliance, no touch-temperature standard and no batteries are claimed
 ///   (this Sink has none to report).
-/// - Sink Modes: caller `SINK_POWER_MODES` (bits 1..4) plus PPS supported;
-///   not AVS (the library does not decode SPR AVS yet).
+/// - Sink Modes: caller `SINK_POWER_MODES` (bits 1..4) plus PPS supported,
+///   and AVS supported when [`Limits::SPR_AVS`] is on.
 /// - SPR PDPs from [`spr_pdps`].
 /// - EPR PDPs 0: not EPR capable (section 6.5.16.1/6.5.16.2).
 pub fn sink_capabilities_extended<L: Limits>() -> Option<[u8; 24]> {
@@ -453,7 +463,8 @@ pub fn sink_capabilities_extended<L: Limits>() -> Option<[u8; 24]> {
     block[8] = identity.fw_version;
     block[9] = identity.hw_version;
     block[10] = 1; // SKEDB Version 1.0
-    block[17] = L::SINK_POWER_MODES | 0b0000_0001; // caller power modes, PPS charging supported
+    // Caller power modes, PPS charging supported (bit 0), AVS supported (bit 5).
+    block[17] = L::SINK_POWER_MODES | 0b0000_0001 | (u8::from(avs_ceiling_mv::<L>() != 0) << 5);
     block[18] = minimum;
     block[19] = operational;
     block[20] = maximum;
@@ -480,6 +491,20 @@ fn pps_ceiling_mv<L: Limits>() -> u32 {
     L::MAX_PPS_MV.min(L::MAX_REQUEST_MV).min(SPR_PPS_MAX_MV)
 }
 
+/// Highest SPR AVS output voltage this policy requests: 20 or 15 V (Table 4.3),
+/// or 0 when SPR AVS is off or `MAX_REQUEST_MV` is below 15 V.
+fn avs_ceiling_mv<L: Limits>() -> u32 {
+    if !L::SPR_AVS {
+        0
+    } else if L::MAX_REQUEST_MV >= SPR_AVS_MAX_MV {
+        SPR_AVS_MAX_MV
+    } else if L::MAX_REQUEST_MV >= SPR_AVS_15V_MAX_MV {
+        SPR_AVS_15V_MAX_MV
+    } else {
+        0
+    }
+}
+
 /// Fixed operational current in Sink_Capabilities: `MAX_CURRENT_MA`, at most
 /// the 5 A cable ceiling ([`FIXED_SINK_MAX_MA`]).
 fn fixed_sink_ma<L: Limits>() -> u32 {
@@ -488,10 +513,11 @@ fn fixed_sink_ma<L: Limits>() -> u32 {
 
 /// SPR Sink Minimum, Operational and Maximum PDP in whole watts, rounded up
 /// (sections 6.5.16.1-6.5.16.3). Minimum is vSafe5V at REQUEST_MA; Operational
-/// covers every mode at its lowest current (fixed targets at REQUEST_MA, PPS at
-/// iPpsCLMin up to the PPS ceiling); Maximum is the larger of PPS at the largest
-/// valid APDO current and the highest fixed target at the advertised fixed
-/// current, capped at SPR's 100 W. `None` for invalid limits.
+/// covers every mode at its lowest current (fixed targets and SPR AVS at
+/// REQUEST_MA, PPS at iPpsCLMin up to the PPS ceiling); Maximum is the largest
+/// of PPS at the largest valid APDO current and the highest fixed target and
+/// SPR AVS voltage at the advertised fixed current, capped at SPR's 100 W.
+/// `None` for invalid limits.
 pub fn spr_pdps<L: Limits>() -> Option<(u8, u8, u8)> {
     if !limits_valid::<L>() {
         return None;
@@ -499,14 +525,16 @@ pub fn spr_pdps<L: Limits>() -> Option<(u8, u8, u8)> {
     let watts = |mv: u32, ma: u32| (mv * ma).div_ceil(MV_MA_PER_WATT).min(SPR_MAX_W) as u8;
     let minimum = watts(VSAFE5V_MV, L::REQUEST_MA);
     let operational = watts(fixed_ceiling_mv::<L>(), L::REQUEST_MA)
-        .max(watts(pps_ceiling_mv::<L>(), PPS_MIN_MA as u32));
+        .max(watts(pps_ceiling_mv::<L>(), PPS_MIN_MA as u32))
+        .max(watts(avs_ceiling_mv::<L>(), L::REQUEST_MA));
     let maximum = operational
         .max(watts(pps_ceiling_mv::<L>(), PPS_APDO_MAX_MA as u32))
-        .max(watts(fixed_ceiling_mv::<L>(), fixed_sink_ma::<L>()));
+        .max(watts(fixed_ceiling_mv::<L>(), fixed_sink_ma::<L>()))
+        .max(watts(avs_ceiling_mv::<L>(), fixed_sink_ma::<L>()));
     Some((minimum, operational, maximum))
 }
 
-/// Highest PPS operating current this sink requests at `mv`: the RDO power
+/// Highest PPS or SPR AVS operating current this sink requests at `mv`: the RDO power
 /// stays within the SPR Sink Maximum PDP (section 3.4.2, RDO rule 1), rounded
 /// down to 50 mA, and within a valid APDO current. 0 for invalid limits or 0 mV.
 pub fn pps_ceiling_ma<L: Limits>(mv: u16) -> u16 {
@@ -530,7 +558,9 @@ pub fn pps_ceiling_ma<L: Limits>(mv: u16) -> u16 {
 /// - the other fixed targets in ascending voltage at the same current;
 /// - PD3 only (APDOs do not exist in PD2): one PPS APDO (Table 6.14) from 5 V to
 ///   the PPS ceiling at [`pps_ceiling_ma`] there, which keeps it within the SPR
-///   Sink Maximum PDP (section 3.4.2, Sink Capabilities rule 4).
+///   Sink Maximum PDP (section 3.4.2, Sink Capabilities rule 4);
+/// - with [`Limits::SPR_AVS`], one SPR AVS APDO (Table 6.15) to the AVS ceiling
+///   at [`avs_request_ma`] for a 5 A Source at 15 V and, for the 20 V range, 20 V.
 ///
 /// Returns the objects and their count; `None` for invalid limits.
 pub fn sink_capabilities<L: Limits>(pd3: bool) -> Option<([u32; MAX_OBJECTS], usize)> {
@@ -553,7 +583,8 @@ pub fn sink_capabilities<L: Limits>(pd3: bool) -> Option<([u32; MAX_OBJECTS], us
         })
         .min()
     {
-        if count == MAX_OBJECTS - 1 {
+        // Leave room for the PPS and SPR AVS APDOs.
+        if count + 1 + usize::from(avs_ceiling_mv::<L>() != 0) == MAX_OBJECTS {
             return None;
         }
         objects[count] = ((mv / FIXED_VOLTAGE_UNIT_MV) << 10) | current;
@@ -567,6 +598,20 @@ pub fn sink_capabilities<L: Limits>(pd3: bool) -> Option<([u32; MAX_OBJECTS], us
             | ((pps_mv / PPS_PDO_VOLTAGE_UNIT_MV) << 17)
             | ((VSAFE5V_MV / PPS_PDO_VOLTAGE_UNIT_MV) << 8)
             | (ma / PPS_CURRENT_UNIT_MA);
+        count += 1;
+    }
+    let avs_mv = avs_ceiling_mv::<L>();
+    if pd3 && avs_mv != 0 {
+        let unit = |mv: u32| {
+            u32::from(avs_request_ma::<L>(AVS_PDO_MAX_MA as u16, mv as u16))
+                / AVS_PDO_CURRENT_UNIT_MA
+        };
+        let high = if avs_mv == SPR_AVS_MAX_MV {
+            unit(SPR_AVS_MAX_MV)
+        } else {
+            0
+        };
+        objects[count] = AVS_APDO_TYPE | (unit(SPR_AVS_15V_MAX_MV) << 10) | high;
         count += 1;
     }
     Some((objects, count))
@@ -615,13 +660,14 @@ pub struct Contract {
     /// Exact upstream request object acknowledged by Accept then PS_RDY.
     pub request: ReviewedRdo,
 }
-/// Raw reviewed fixed or PPS RDO, interpreted against `Contract::capabilities`.
+/// Raw reviewed fixed, PPS or SPR AVS RDO, interpreted against `Contract::capabilities`.
 #[derive(Debug, Clone, Copy)]
 pub struct ReviewedRdo(pub u32);
 fn request_raw(request: &request::PowerSource) -> Option<u32> {
     match request {
         request::PowerSource::FixedVariableSupply(rdo) => Some(rdo.0),
         request::PowerSource::Pps(rdo) => Some(rdo.0),
+        request::PowerSource::Avs(rdo) => Some(rdo.0),
         _ => None,
     }
 }
@@ -692,6 +738,83 @@ pub fn request_pps<L: Limits>(
             .with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
             .with_no_usb_suspend(L::NO_USB_SUSPEND)
             .with_raw_output_voltage(mv / PPS_RDO_VOLTAGE_UNIT_MV as u16)
+            .with_raw_operating_current(ma / PPS_CURRENT_UNIT_MA as u16),
+    ))
+}
+
+/// One SPR AVS APDO's range end and its 9-15 V and 15-20 V Maximum Currents in
+/// mA (Table 6.15); `None` for another object or an Invalid current above 5 A
+/// or a zero 15 V current.
+fn avs_apdo(raw: u32) -> Option<(u32, u32, u32)> {
+    let low = (raw >> 10 & AVS_APDO_CURRENT_MASK) * AVS_PDO_CURRENT_UNIT_MA;
+    let high = (raw & AVS_APDO_CURRENT_MASK) * AVS_PDO_CURRENT_UNIT_MA;
+    let max_mv = if high == 0 {
+        SPR_AVS_15V_MAX_MV
+    } else {
+        SPR_AVS_MAX_MV
+    };
+    (raw & PPS_APDO_TYPE_MASK == AVS_APDO_TYPE
+        && low > 0
+        && low <= AVS_PDO_MAX_MA
+        && high <= AVS_PDO_MAX_MA)
+        .then_some((max_mv, low, high))
+}
+
+/// SPR AVS operating current this sink requests from an APDO current
+/// `apdo_ma` at `mv`: the highest it may draw (Table 6.22), at most the
+/// caller's `MAX_CURRENT_MA` and within the Sink Maximum PDP ([`pps_ceiling_ma`]),
+/// in 50 mA units.
+pub fn avs_request_ma<L: Limits>(apdo_ma: u16, mv: u16) -> u16 {
+    let ma = u32::from(apdo_ma)
+        .min(L::MAX_CURRENT_MA)
+        .min(u32::from(pps_ceiling_ma::<L>(mv)));
+    (ma / PPS_CURRENT_UNIT_MA * PPS_CURRENT_UNIT_MA) as u16
+}
+
+/// The operating current of an SPR AVS request at `mv` from APDO `raw`; `None`
+/// when SPR AVS is off, `mv` is outside the APDO range or the AVS ceiling or
+/// off the 100 mV step, or the current is below `REQUEST_MA`.
+fn avs_target_ma<L: Limits>(raw: u32, mv: u32) -> Option<u16> {
+    let (max_mv, low, high) = avs_apdo(raw)?;
+    if !(SPR_AVS_MIN_MV..=max_mv.min(avs_ceiling_mv::<L>())).contains(&mv)
+        || !mv.is_multiple_of(AVS_VOLTAGE_STEP_MV)
+    {
+        return None;
+    }
+    let apdo_ma = if mv <= SPR_AVS_15V_MAX_MV { low } else { high };
+    let ma = avs_request_ma::<L>(apdo_ma as u16, mv as u16);
+    (u32::from(ma) >= L::REQUEST_MA).then_some(ma)
+}
+
+/// An SPR AVS Request (Table 6.22) for object `object` at `mv`, asking for
+/// [`avs_request_ma`]. Requires [`Limits::SPR_AVS`].
+pub fn request_avs<L: Limits>(
+    capabilities: &source_capabilities::SourceCapabilities,
+    object: u8,
+    mv: u16,
+) -> Result<request::PowerSource, Error> {
+    use source_capabilities::{Augmented, PowerDataObject};
+    if !limits_valid::<L>()
+        || capabilities.pdos().len() > MAX_OBJECTS
+        || object == 0
+        || object as usize > MAX_OBJECTS
+        || !matches!(capabilities.pdos().first(), Some(PowerDataObject::FixedSupply(pdo))
+            if u32::from(pdo.raw_voltage()) * FIXED_VOLTAGE_UNIT_MV == VSAFE5V_MV)
+    {
+        return Err(Error::UnsafeCapabilities);
+    }
+    let Some(PowerDataObject::Augmented(Augmented::SprAvs(pdo))) =
+        capabilities.pdos().get(object as usize - 1)
+    else {
+        return Err(Error::UnsafeCapabilities);
+    };
+    let ma = avs_target_ma::<L>(pdo.0, u32::from(mv)).ok_or(Error::UnsafeCapabilities)?;
+    Ok(request::PowerSource::Avs(
+        request::Avs(0)
+            .with_object_position(object)
+            .with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
+            .with_no_usb_suspend(L::NO_USB_SUSPEND)
+            .with_raw_output_voltage(mv / AVS_RDO_VOLTAGE_UNIT_MV as u16)
             .with_raw_operating_current(ma / PPS_CURRENT_UNIT_MA as u16),
     ))
 }
@@ -778,17 +901,29 @@ pub fn review_rdo<L: Limits>(
     }
     let object = caps.objects[index];
     let target = selected.unwrap_or(Target::fixed(L::TARGET_MV as u16, L::REQUEST_MA as u16));
-    if target.pps_object != 0 {
+    let safe5v_first = caps.objects[0]
+        .fixed
+        .is_some_and(|(mv, _)| u32::from(mv) == VSAFE5V_MV);
+    if let Supply::Avs(position) = target.supply {
+        // Table 6.22: the PPS RDO field masks and flag bits also hold for AVS.
+        let mv = ((rdo >> 9) & PPS_RDO_VOLTAGE_MASK) * AVS_RDO_VOLTAGE_UNIT_MV;
+        let ma = (rdo & PPS_RDO_CURRENT_MASK) * PPS_CURRENT_UNIT_MA;
+        return position as usize == index + 1
+            && safe5v_first
+            && avs_target_ma::<L>(object.raw, mv) == Some(target.ma)
+            && mv == u32::from(target.mv)
+            && ma == u32::from(target.ma)
+            && rdo & PPS_RDO_FLAGS_MASK == rdo_flags::<L>();
+    }
+    if let Supply::Pps(position) = target.supply {
         let raw = object.raw;
         let min = ((raw >> 8) & PPS_APDO_VOLTAGE_MASK) * PPS_PDO_VOLTAGE_UNIT_MV;
         let max = ((raw >> 17) & PPS_APDO_VOLTAGE_MASK) * PPS_PDO_VOLTAGE_UNIT_MV;
         let max_ma = (raw & PPS_RDO_CURRENT_MASK) * PPS_CURRENT_UNIT_MA;
         let mv = ((rdo >> 9) & PPS_RDO_VOLTAGE_MASK) * PPS_RDO_VOLTAGE_UNIT_MV;
         let ma = (rdo & PPS_RDO_CURRENT_MASK) * PPS_CURRENT_UNIT_MA;
-        return target.pps_object as usize == index + 1
-            && caps.objects[0]
-                .fixed
-                .is_some_and(|(mv, _)| u32::from(mv) == VSAFE5V_MV)
+        return position as usize == index + 1
+            && safe5v_first
             && raw & PPS_APDO_TYPE_MASK == PPS_APDO_TYPE
             && min > 0
             && min <= max
@@ -866,32 +1001,47 @@ pub struct MaintainedTrace {
     pub bist_carriers_sent: u32,
 }
 
+/// What a target asks for: a Fixed Supply, or the PPS or SPR AVS APDO at an
+/// advertised object position (1..=7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Supply {
+    Fixed,
+    Pps(u8),
+    Avs(u8),
+}
+impl Supply {
+    /// The APDO object position; `None` for a Fixed Supply.
+    pub const fn object(self) -> Option<u8> {
+        match self {
+            Self::Fixed => None,
+            Self::Pps(object) | Self::Avs(object) => Some(object),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     pub mv: u16,
+    /// PPS: the Operating Current limit; Fixed and SPR AVS: what the request asks for.
     pub ma: u16,
-    /// Zero denotes fixed supply; nonzero is the advertised APDO position.
-    pub pps_object: u8,
+    pub supply: Supply,
 }
 impl Target {
     const fn fixed(mv: u16, ma: u16) -> Self {
         Self {
             mv,
             ma,
-            pps_object: 0,
+            supply: Supply::Fixed,
         }
-    }
-    const fn pps(mv: u16, ma: u16, pps_object: u8) -> Self {
-        Self { mv, ma, pps_object }
     }
     fn request<L: Limits>(
         self,
         caps: &source_capabilities::SourceCapabilities,
     ) -> Result<request::PowerSource, Error> {
-        if self.pps_object == 0 {
-            request_fixed::<L>(caps, self.mv as u32)
-        } else {
-            request_pps::<L>(caps, self.pps_object, self.mv, self.ma)
+        match self.supply {
+            Supply::Fixed => request_fixed::<L>(caps, self.mv as u32),
+            Supply::Pps(object) => request_pps::<L>(caps, object, self.mv, self.ma),
+            Supply::Avs(object) => request_avs::<L>(caps, object, self.mv),
         }
     }
 }
@@ -900,8 +1050,11 @@ impl Target {
 pub struct Selection<L: Limits> {
     limits: PhantomData<L>,
     options: Cell<[Target; 7]>,
-    pps_max: Cell<[u16; 7]>,
+    // Per object position: the APDO range's highest requested voltage, the
+    // PPS Maximum Current, and the raw SPR AVS APDO its currents come from.
+    range_max_mv: Cell<[u16; 7]>,
     pps_max_ma: Cell<[u16; 7]>,
+    avs_raw: Cell<[u32; 7]>,
     peer_revision: Cell<u8>,
     now_ms: Cell<u64>,
     next_pps_ms: Cell<Option<u64>>,
@@ -947,8 +1100,9 @@ impl<L: Limits> Selection<L> {
         Self {
             limits: PhantomData,
             options: Cell::new([Target::fixed(0, L::REQUEST_MA as u16); 7]),
-            pps_max: Cell::new([0; 7]),
+            range_max_mv: Cell::new([0; 7]),
             pps_max_ma: Cell::new([0; 7]),
+            avs_raw: Cell::new([0; 7]),
             peer_revision: Cell::new(0),
             now_ms: Cell::new(0),
             next_pps_ms: Cell::new(None),
@@ -1020,8 +1174,9 @@ impl<L: Limits> Selection<L> {
         self.status_requested.set(false);
         self.options
             .set([Target::fixed(0, L::REQUEST_MA as u16); 7]);
-        self.pps_max.set([0; 7]);
+        self.range_max_mv.set([0; 7]);
         self.pps_max_ma.set([0; 7]);
+        self.avs_raw.set([0; 7]);
         self.now_ms.set(0);
         self.target
             .set(Target::fixed(VSAFE5V_MV as u16, L::REQUEST_MA as u16));
@@ -1042,11 +1197,21 @@ impl<L: Limits> Selection<L> {
     pub fn candidate_ma(&self) -> u16 {
         self.candidate.get().ma
     }
+    pub fn target_supply(&self) -> Supply {
+        self.target.get().supply
+    }
+    pub fn candidate_supply(&self) -> Supply {
+        self.candidate.get().supply
+    }
+    /// The PPS APDO position of the target; 0 for any other supply.
     pub fn target_pps_object(&self) -> u8 {
-        self.target.get().pps_object
+        match self.target.get().supply {
+            Supply::Pps(object) => object,
+            Supply::Fixed | Supply::Avs(_) => 0,
+        }
     }
     pub fn candidate_is_pps(&self) -> bool {
-        self.candidate.get().pps_object != 0
+        matches!(self.candidate.get().supply, Supply::Pps(_))
     }
     pub fn adjusting_current(&self) -> bool {
         self.adjust_current.get()
@@ -1115,7 +1280,7 @@ impl<L: Limits> Selection<L> {
             && !self.has_pending()
             && !self.cable_active.get()
             && self.peer_revision.get() == 2
-            && self.target.get().pps_object != 0
+            && matches!(self.target.get().supply, Supply::Pps(_))
             && self.established.get() == Some(self.target.get())
             && self
                 .pps_status_at_ms
@@ -1300,8 +1465,9 @@ impl<L: Limits> Selection<L> {
     }
     fn advertise(&self, capabilities: &source_capabilities::SourceCapabilities) {
         let mut options = [Target::fixed(0, L::REQUEST_MA as u16); 7];
-        let mut pps_max = [0; 7];
+        let mut range_max_mv = [0; 7];
         let mut pps_max_ma = [0; 7];
+        let mut avs_raw = [0; 7];
         let mut count = 0;
         for (index, pdo) in capabilities.pdos().iter().enumerate() {
             if let source_capabilities::PowerDataObject::FixedSupply(pdo) = pdo {
@@ -1331,32 +1497,69 @@ impl<L: Limits> Selection<L> {
                     && count < 7
                     && request_pps::<L>(capabilities, index as u8 + 1, min, start_ma).is_ok()
                 {
-                    options[count] = Target::pps(min, start_ma, index as u8 + 1);
-                    pps_max[index] = max;
+                    options[count] = Target {
+                        mv: min,
+                        ma: start_ma,
+                        supply: Supply::Pps(index as u8 + 1),
+                    };
+                    range_max_mv[index] = max;
                     pps_max_ma[index] = max_ma;
                     count += 1;
                 }
+            } else if let source_capabilities::PowerDataObject::Augmented(
+                source_capabilities::Augmented::SprAvs(pdo),
+            ) = pdo
+                && self.peer_revision.get() == 2
+                && count < 7
+                && let Some((max_mv, _, _)) = avs_apdo(pdo.0)
+                && let Some(ma) = avs_target_ma::<L>(pdo.0, SPR_AVS_MIN_MV)
+            {
+                options[count] = Target {
+                    mv: SPR_AVS_MIN_MV as u16,
+                    ma,
+                    supply: Supply::Avs(index as u8 + 1),
+                };
+                range_max_mv[index] = max_mv.min(avs_ceiling_mv::<L>()) as u16;
+                avs_raw[index] = pdo.0;
+                count += 1;
             }
         }
         self.epr_capable.set(capabilities.epr_mode_capable());
         self.options.set(options);
-        self.pps_max.set(pps_max);
+        self.range_max_mv.set(range_max_mv);
         self.pps_max_ma.set(pps_max_ma);
+        self.avs_raw.set(avs_raw);
         self.count.set(count);
-        let candidate = self.candidate.get();
-        if !options[..count].iter().any(|option| {
-            *option == candidate
-                || (candidate.pps_object != 0
-                    && option.pps_object == candidate.pps_object
-                    && candidate.mv >= option.mv
-                    && candidate.mv <= pps_max[candidate.pps_object as usize - 1]
-                    && candidate.ma >= PPS_MIN_MA
-                    && candidate.ma <= pps_max_ma[candidate.pps_object as usize - 1]
-                    && candidate.ma <= pps_ceiling_ma::<L>(candidate.mv))
-        }) {
+        if !self.offered(self.candidate.get()) {
             self.candidate.set(options[0]);
             self.adjust_current.set(false);
         }
+    }
+    /// `target` is an advertised fixed option, or lies within an advertised
+    /// PPS or SPR AVS range on its step, within this policy's limits.
+    fn offered(&self, target: Target) -> bool {
+        let index = |object: u8| usize::from(object).checked_sub(1).filter(|&i| i < 7);
+        self.options.get()[..self.count.get()]
+            .iter()
+            .any(|option| match target.supply {
+                Supply::Fixed => *option == target,
+                Supply::Pps(object) => index(object).is_some_and(|i| {
+                    option.supply == target.supply
+                        && target.mv >= option.mv
+                        && target.mv <= self.range_max_mv.get()[i]
+                        && target.mv.is_multiple_of(PPS_RDO_VOLTAGE_UNIT_MV as u16)
+                        && target.ma >= PPS_MIN_MA
+                        && target.ma <= self.pps_max_ma.get()[i]
+                        && target.ma <= pps_ceiling_ma::<L>(target.mv)
+                        && target.ma.is_multiple_of(PPS_CURRENT_UNIT_MA as u16)
+                }),
+                Supply::Avs(object) => index(object).is_some_and(|i| {
+                    option.supply == target.supply
+                        && target.mv <= self.range_max_mv.get()[i]
+                        && avs_target_ma::<L>(self.avs_raw.get()[i], u32::from(target.mv))
+                            == Some(target.ma)
+                }),
+            })
     }
     pub fn now_ms(&self) -> u64 {
         self.now_ms.get()
@@ -1372,29 +1575,7 @@ impl<L: Limits> Selection<L> {
         if self.has_pending() || self.request_in_flight.get() || self.cable_active() {
             return false;
         }
-        let options = self.options.get();
-        let valid = options[..self.count.get()].iter().any(|option| {
-            if target.pps_object == 0 {
-                *option == target
-            } else {
-                let Some(index) = target
-                    .pps_object
-                    .checked_sub(1)
-                    .map(usize::from)
-                    .filter(|i| *i < 7)
-                else {
-                    return false;
-                };
-                option.pps_object == target.pps_object
-                    && target.mv >= option.mv
-                    && target.mv <= self.pps_max.get()[index]
-                    && target.mv.is_multiple_of(20)
-                    && target.ma >= PPS_MIN_MA
-                    && target.ma <= self.pps_max_ma.get()[index]
-                    && target.ma <= pps_ceiling_ma::<L>(target.mv)
-                    && target.ma.is_multiple_of(PPS_CURRENT_UNIT_MA as u16)
-            }
-        });
+        let valid = self.offered(target);
         if valid {
             self.candidate.set(target);
             self.adjust_current.set(false);
@@ -1444,43 +1625,65 @@ impl<L: Limits> Selection<L> {
         }
         let candidate = self.candidate.get();
         let options = self.options.get();
-        if candidate.pps_object != 0 {
-            let obj_idx = candidate.pps_object as usize - 1;
-            let max_mv = self.pps_max.get()[obj_idx];
-            let max_ma = self.pps_max_ma.get()[obj_idx];
-            if self.adjust_current.get() {
-                let next_ma = candidate.ma.saturating_add(current_step);
-                let ma = if next_ma > max_ma.min(pps_ceiling_ma::<L>(candidate.mv)) {
-                    PPS_MIN_MA
+        // The option after the candidate's own (its range's, for an APDO).
+        let next_option = || {
+            let index = options[..count]
+                .iter()
+                .position(|option| option.supply == candidate.supply)
+                .unwrap_or(0);
+            self.candidate.set(options[(index + 1) % count]);
+            self.adjust_current.set(false);
+        };
+        match candidate.supply {
+            Supply::Pps(object) => {
+                let obj_idx = object as usize - 1;
+                let max_mv = self.range_max_mv.get()[obj_idx];
+                let max_ma = self.pps_max_ma.get()[obj_idx];
+                if self.adjust_current.get() {
+                    let next_ma = candidate.ma.saturating_add(current_step);
+                    let ma = if next_ma > max_ma.min(pps_ceiling_ma::<L>(candidate.mv)) {
+                        PPS_MIN_MA
+                    } else {
+                        next_ma
+                    };
+                    self.candidate.set(Target { ma, ..candidate });
+                } else if candidate.mv < max_mv {
+                    // A higher voltage lowers the current that stays within the Sink Maximum PDP.
+                    let mv = candidate.mv.saturating_add(voltage_step).min(max_mv);
+                    self.candidate.set(Target {
+                        mv,
+                        ma: candidate.ma.min(pps_ceiling_ma::<L>(mv)),
+                        ..candidate
+                    });
                 } else {
-                    next_ma
-                };
-                self.candidate.set(Target { ma, ..candidate });
-            } else if candidate.mv < max_mv {
-                // A higher voltage lowers the current that stays within the Sink Maximum PDP.
-                let mv = candidate.mv.saturating_add(voltage_step).min(max_mv);
-                self.candidate.set(Target {
-                    mv,
-                    ma: candidate.ma.min(pps_ceiling_ma::<L>(mv)),
-                    ..candidate
-                });
-            } else {
+                    next_option();
+                }
+            }
+            Supply::Avs(object) => {
+                let i = object as usize - 1;
+                // SPR AVS moves in 100 mV steps and asks for the current its voltage allows.
+                let step = voltage_step.next_multiple_of(AVS_VOLTAGE_STEP_MV as u16);
+                let mv = candidate
+                    .mv
+                    .saturating_add(step)
+                    .min(self.range_max_mv.get()[i]);
+                match avs_target_ma::<L>(self.avs_raw.get()[i], u32::from(mv)) {
+                    Some(ma) if mv > candidate.mv => self.candidate.set(Target {
+                        mv,
+                        ma,
+                        ..candidate
+                    }),
+                    _ => next_option(),
+                }
+            }
+            Supply::Fixed => {
                 let index = options[..count]
                     .iter()
-                    .position(|option| {
-                        *option == candidate || option.pps_object == candidate.pps_object
-                    })
+                    .position(|option| *option == candidate)
                     .unwrap_or(0);
                 self.candidate.set(options[(index + 1) % count]);
                 self.adjust_current.set(false);
             }
-        } else {
-            let index = options[..count]
-                .iter()
-                .position(|option| *option == candidate)
-                .unwrap_or(0);
-            self.candidate.set(options[(index + 1) % count]);
-            self.adjust_current.set(false);
         }
     }
 }
@@ -1941,17 +2144,19 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
             Target::fixed(L::TARGET_MV as u16, L::REQUEST_MA as u16),
             |selection| selection.target.get(),
         );
-        if target.pps_object != 0 && selection.is_none_or(|s| s.peer_revision.get() != 2) {
+        // APDOs do not exist in PD2 (Table 6.7).
+        if target.supply != Supply::Fixed && selection.is_none_or(|s| s.peer_revision.get() != 2) {
             self.shared.borrow_mut().fail(Error::UnsafeCapabilities);
             return pending().await;
         }
         match target.request::<L>(capabilities) {
             Ok(request) => {
-                // Target::request only constructs fixed or PPS requests.
+                // Target::request only constructs fixed, PPS or SPR AVS requests.
                 self.shared.borrow_mut().selected = Some(Contract {
                     capabilities: capabilities.clone(),
                     request: ReviewedRdo(
-                        request_raw(&request).expect("target request must be fixed or PPS"),
+                        request_raw(&request)
+                            .expect("target request must be fixed, PPS or SPR AVS"),
                     ),
                 });
                 request
@@ -2299,11 +2504,12 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
                     selection.target.set(target);
                     selection.begin_request();
                     selection.set_rx_idle(false);
-                    // Target::request only constructs fixed or PPS requests.
+                    // Target::request only constructs fixed, PPS or SPR AVS requests.
                     self.shared.borrow_mut().selected = Some(Contract {
                         capabilities: capabilities.clone(),
                         request: ReviewedRdo(
-                            request_raw(&request).expect("target request must be fixed or PPS"),
+                            request_raw(&request)
+                                .expect("target request must be fixed, PPS or SPR AVS"),
                         ),
                     });
                     Poll::Ready(Event::RequestPower(request))
@@ -2404,7 +2610,9 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
         last_rx_id: Option<u8>,
     ) -> Result<usbpd_traits::CableReport, DriverRxError> {
         if !self.shared.borrow().selection.is_some_and(|s| {
-            s.cable_active() && u32::from(s.target_mv()) == VSAFE5V_MV && s.target_pps_object() == 0
+            s.cable_active()
+                && u32::from(s.target_mv()) == VSAFE5V_MV
+                && s.target_supply() == Supply::Fixed
         }) {
             self.shared.borrow_mut().fail(Error::TransmissionBlocked);
             return pending().await;

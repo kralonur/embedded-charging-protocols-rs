@@ -42,6 +42,17 @@ pub(crate) const PPS_PDO_VOLTAGE_UNIT_MV: u32 = 100;
 pub(crate) const AVS_PDO_VOLTAGE_UNIT_MV: u32 = 100;
 pub(crate) const PPS_RDO_VOLTAGE_UNIT_MV: u32 = 20;
 pub(crate) const PPS_CURRENT_UNIT_MA: u32 = 50;
+// AVS RDO Output Voltage unit, and its effective step: bits 10..9 are zero (Table 6.22).
+pub(crate) const AVS_RDO_VOLTAGE_UNIT_MV: u32 = 25;
+pub(crate) const AVS_VOLTAGE_STEP_MV: u32 = 100;
+// SPR AVS APDO Maximum Current unit and largest valid value, 5 A (Table 6.15).
+pub(crate) const AVS_PDO_CURRENT_UNIT_MA: u32 = 10;
+pub(crate) const AVS_PDO_MAX_MA: u32 = 5_000;
+// SPR AVS ranges: 9 V up to 15 V, or up to 20 V when the APDO has a 15-20 V
+// current; the 15 V current applies up to 15 V (Tables 4.3, 6.15).
+pub(crate) const SPR_AVS_MIN_MV: u32 = 9_000;
+pub(crate) const SPR_AVS_15V_MAX_MV: u32 = 15_000;
+pub(crate) const SPR_AVS_MAX_MV: u32 = 20_000;
 // Millivolts times milliamperes per watt, from SI unit conversion.
 pub(crate) const MV_MA_PER_WATT: u32 = 1_000_000;
 // vSafe5V and SPR fixed/PPS voltage and power ceilings (sections 6.4.1 and 3.4.2).

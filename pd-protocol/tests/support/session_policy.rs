@@ -2,7 +2,7 @@
 use pd_protocol::pd_spr as shared;
 use usbpd::protocol_layer::message::data::{request, source_capabilities};
 
-pub use shared::{Error, MaintainedTrace, PpsStatus};
+pub use shared::{Error, MaintainedTrace, PpsStatus, Supply};
 #[path = "timing.rs"]
 mod timing;
 // Named clock inputs used by the session fixtures.

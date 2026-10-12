@@ -604,7 +604,7 @@ fn advertised_facts_come_only_from_the_caller_limits() {
         Some(Target {
             mv: 3300,
             ma: 1000,
-            pps_object: 4
+            supply: pd_spr::Supply::Pps(4)
         })
     ));
     // Another caller's flags are refused by this review gate.
@@ -782,7 +782,7 @@ fn portable_raw_rdo_review_matches_caller_target_and_limits() {
     let target = Target {
         mv: 3300,
         ma: 1000,
-        pps_object: 4,
+        supply: pd_spr::Supply::Pps(4),
     };
     assert!(pd_spr::review_rdo::<Portable>(
         &advertisements,
@@ -884,12 +884,12 @@ fn semantic_previews_and_confirmations_work_without_buttons_or_display() {
     assert!(!selection.preview(Target {
         mv: 9000,
         ma: 500,
-        pps_object: 0
+        supply: pd_spr::Supply::Fixed
     }));
     assert!(selection.preview(Target {
         mv: 3300,
         ma: 1000,
-        pps_object: 4
+        supply: pd_spr::Supply::Pps(4)
     }));
     assert_eq!(selection.target_mv(), 5000);
     assert!(!selection.has_pending());
@@ -943,7 +943,7 @@ fn pps_apdo_reserved_bits_are_ignored_but_rdo_reserved_bits_are_not() {
     let target = Target {
         mv: 3300,
         ma: 1000,
-        pps_object: 4,
+        supply: pd_spr::Supply::Pps(4),
     };
     assert!(pd_spr::review_rdo::<Portable>(
         &advertisements,
@@ -1076,7 +1076,7 @@ fn pps_current_stays_within_sink_maximum_pdp() {
     let target = Target {
         mv: 21_000,
         ma: 4_750,
-        pps_object: 2,
+        supply: pd_spr::Supply::Pps(2),
     };
     assert!(pd_spr::review_rdo::<Spr>(
         &advertisements,
@@ -1110,28 +1110,28 @@ fn pps_current_stays_within_sink_maximum_pdp() {
             == Some(Target {
                 mv: 5_000,
                 ma: 5_000,
-                pps_object: 2
+                supply: pd_spr::Supply::Pps(2)
             })
     );
     assert!(!selection.preview(Target {
         mv: 21_000,
         ma: 5_000,
-        pps_object: 2
+        supply: pd_spr::Supply::Pps(2)
     }));
     assert!(!selection.preview(Target {
         mv: 21_000,
         ma: 4_800,
-        pps_object: 2
+        supply: pd_spr::Supply::Pps(2)
     }));
     assert!(selection.preview(Target {
         mv: 21_000,
         ma: 4_750,
-        pps_object: 2
+        supply: pd_spr::Supply::Pps(2)
     }));
     assert!(selection.preview(Target {
         mv: 20_000,
         ma: 5_000,
-        pps_object: 2
+        supply: pd_spr::Supply::Pps(2)
     }));
     selection.advance(1_000, 50);
     assert_eq!(
@@ -1156,7 +1156,7 @@ fn pps_current_stays_within_sink_maximum_pdp() {
         Some(Target {
             mv: 9_000,
             ma: 1_000,
-            pps_object: 2
+            supply: pd_spr::Supply::Pps(2)
         })
     ));
 }
@@ -1334,4 +1334,160 @@ fn partner_extended_framing_is_opt_in_and_never_assembles() {
         pd_rx::decode_wire_with(Sop::Cable, &wire(0x9182, &[2, 0x88, 0, 0]), true, true),
         Err(pd_rx::Error::InvalidExtended)
     );
+}
+
+// SPR AVS is a request path of its own: a wrong voltage step, current or
+// object must never reach the wire, and browsing must follow the APDO's two
+// current ranges.
+#[test]
+fn spr_avs_requests_follow_tables_6_15_and_6_22() {
+    struct Avs;
+    impl Limits for Avs {
+        const SESSION_POLICY: pd_spr::SessionPolicy = timing::SESSION_POLICY;
+        const SINK_IDENTITY: pd_spr::SinkIdentity = pd_spr::SinkIdentity::UNASSIGNED;
+        const MAX_REQUEST_MV: u32 = 20_000;
+        const MIN_PPS_MV: u32 = 5_000;
+        const MAX_PPS_MV: u32 = 11_000;
+        const TARGET_MV: u32 = 5_000;
+        const REQUEST_MA: u32 = 500;
+        const MAX_CURRENT_MA: u32 = 5_000;
+        const USB_COMMUNICATIONS_CAPABLE: bool = false;
+        const NO_USB_SUSPEND: bool = true;
+        const HIGHER_CAPABILITY: bool = true;
+        const UNCONSTRAINED_POWER: bool = false;
+        const SINK_POWER_MODES: u8 = 0b10;
+        const FIXED_TARGETS: &'static [u16] = &[5_000, 15_000];
+        const PPS_REFRESH_MS: u64 = 3_000;
+        const SPR_AVS: bool = true;
+    }
+    // Table 6.15: 3.00 A from 9 to 15 V, 2.25 A from 15 to 20 V.
+    let avs = 0xe000_0000 | (300 << 10) | 225;
+    let wire = objects(0x3181, &[fixed(5000), fixed(15000), avs]);
+    let advertisements = pd_rx::decode_wire(Sop::Partner, &wire, false)
+        .unwrap()
+        .0
+        .advertisements()
+        .unwrap();
+    let caps = match Message::from_bytes(&wire[..wire.len() - 4])
+        .unwrap()
+        .payload
+        .unwrap()
+    {
+        Payload::Data(Data::SourceCapabilities(caps)) => caps,
+        _ => panic!("fixture"),
+    };
+    let request::PowerSource::Avs(rdo) = pd_spr::request_avs::<Avs>(&caps, 3, 16_000).unwrap()
+    else {
+        panic!()
+    };
+    // Table 6.22: position 3, 16 V in 25 mV units, 2.25 A in 50 mA units, No USB Suspend.
+    assert_eq!(rdo.0, 3 << 28 | 1 << 24 | (16_000 / 25) << 9 | 45);
+    let target = Target {
+        mv: 16_000,
+        ma: 2_250,
+        supply: pd_spr::Supply::Avs(3),
+    };
+    assert!(pd_spr::review_rdo::<Avs>(
+        &advertisements,
+        rdo.0,
+        Some(target)
+    ));
+    for (bad, why) in [
+        (rdo.0 ^ 1 << 9, "off the 100 mV step"),
+        ((rdo.0 & !0x7f) | 46, "above the 20 V range current"),
+        ((rdo.0 & !(0xf << 28)) | 2 << 28, "another object"),
+        (rdo.0 | 1 << 22, "a flag this sink does not set"),
+    ] {
+        assert!(
+            !pd_spr::review_rdo::<Avs>(&advertisements, bad, Some(target)),
+            "{why}"
+        );
+    }
+    // The fixed review gate does not accept the AVS RDO either.
+    assert!(!pd_spr::review_rdo::<Avs>(&advertisements, rdo.0, None));
+    for mv in [8_900, 9_050, 20_100] {
+        assert!(pd_spr::request_avs::<Avs>(&caps, 3, mv).is_err(), "{mv}");
+    }
+    assert!(
+        pd_spr::request_avs::<Avs>(&caps, 2, 15_000).is_err(),
+        "a fixed object"
+    );
+    assert!(
+        pd_spr::request_avs::<Portable>(&caps, 3, 9_000).is_err(),
+        "SPR AVS off"
+    );
+
+    // Sink_Capabilities: an SPR AVS APDO to 20 V at 5 A after the PPS APDO
+    // (Table 6.15), and SKEDB Sink Modes bit 5 (Table 6.61).
+    let (objects, count) = pd_spr::sink_capabilities::<Avs>(true).unwrap();
+    assert_eq!(objects[count - 1], 0xe000_0000 | 500 << 10 | 500);
+    assert_eq!(
+        pd_spr::sink_capabilities_extended::<Avs>().unwrap()[17],
+        0b10_0011
+    );
+    assert_eq!(
+        pd_spr::sink_capabilities_extended::<Portable>().unwrap()[17],
+        0b0011
+    );
+
+    // Browsing: 100 mV steps from 9 V, the current follows the range, then the next option.
+    let mut wire = wire;
+    wire.truncate(wire.len() - 4);
+    let mut driver = DriverModel {
+        rx: [wire, vec![0x83, 3], vec![0x86, 5]].into(),
+        tx: vec![],
+    };
+    let selection = pd_spr::Selection::<Avs>::new();
+    let trace = RefCell::new(pd_spr::MaintainedTrace::default());
+    let mut trial = pd_spr::Trial::<Avs>::maintained();
+    let mut future = Box::pin(trial.run_selectable::<_, Never>(&mut driver, &trace, &selection));
+    assert!(poll(future.as_mut()).is_pending());
+    assert!(
+        selection.option(2)
+            == Some(Target {
+                mv: 9_000,
+                ma: 3_000,
+                supply: pd_spr::Supply::Avs(3)
+            })
+    );
+    assert!(!selection.preview(Target {
+        mv: 9_050,
+        ..target
+    }));
+    assert!(!selection.preview(Target {
+        ma: 2_300,
+        ..target
+    }));
+    assert!(!selection.preview(Target {
+        mv: 14_980,
+        ma: 3_000,
+        supply: pd_spr::Supply::Avs(3)
+    }));
+    assert!(selection.preview(Target {
+        mv: 14_900,
+        ma: 3_000,
+        supply: pd_spr::Supply::Avs(3)
+    }));
+    selection.advance(20, 50);
+    assert_eq!(
+        (selection.candidate_mv(), selection.candidate_ma()),
+        (15_000, 3_000)
+    );
+    selection.advance(20, 50);
+    assert_eq!(
+        (selection.candidate_mv(), selection.candidate_ma()),
+        (15_100, 2_250)
+    );
+    assert!(selection.preview(Target {
+        mv: 20_000,
+        ma: 2_250,
+        ..target
+    }));
+    selection.advance(100, 50);
+    assert_eq!(
+        selection.candidate_supply(),
+        pd_spr::Supply::Fixed,
+        "wraps to the first option"
+    );
+    drop(future);
 }

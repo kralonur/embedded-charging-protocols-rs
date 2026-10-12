@@ -16,8 +16,13 @@ the caller.
 The `pd-protocol` crate (`pd-protocol/`) provides a USB PD sink engine and
 packet inspector:
 
-- **Guarded SPR sink negotiation:** fixed and PPS (Programmable Power Supply)
-  Standard Power Range negotiation (up to 20 V fixed, 21 V PPS, 100 W).
+- **Guarded SPR sink negotiation:** fixed, PPS (Programmable Power Supply)
+  and, when the caller turns it on, SPR AVS (Adjustable Voltage Supply)
+  Standard Power Range negotiation (up to 20 V fixed, 21 V PPS, 9-20 V AVS,
+  100 W).
+- **Source information:** extended capabilities, revision, manufacturer,
+  source info and status, and, for a battery-powered source, its battery's
+  capacity and charge.
 - **EPR offer on request:** asks an EPR-capable source for its EPR offer and
   collects the answer, for display only.
 - **Session safety guards:** independent validation of incoming framing and
@@ -63,7 +68,6 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
 - **Sink only:** no source role, and no power role, data role or VCONN swap.
 - **No EPR mode:** the EPR offer can be read, but EPR mode is never entered and
   no EPR object is requested.
-- **No AVS requests:** AVS objects are decoded for display only.
 - **No PHY included:** the caller implements `usbpd-traits` for its PD
   controller and supplies clocks, limits and policy.
 

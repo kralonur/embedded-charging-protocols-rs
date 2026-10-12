@@ -40,6 +40,11 @@ pub enum Supply {
         mv: u32,
         ma: u32,
     },
+    /// SPR or EPR AVS.
+    Avs {
+        mv: u32,
+        ma: u32,
+    },
     /// No matching PDO known, or a PDO kind this log does not decode.
     Raw,
 }
@@ -95,6 +100,11 @@ fn decode_request(rdo: u32, pdo: Option<u32>) -> Supply {
         // SPR PPS APDO (Table 6.13) with a PPS RDO (Table 6.21).
         Some(p) if p >> 28 == 0b1100 => Supply::Pps {
             mv: ((rdo >> 9) & 0xfff) * PPS_RDO_VOLTAGE_UNIT_MV,
+            ma: (rdo & 0x7f) * PPS_CURRENT_UNIT_MA,
+        },
+        // SPR AVS or EPR AVS APDO (Tables 6.15, 6.16) with an AVS RDO (Table 6.22).
+        Some(p) if p >> 28 == 0b1110 || p >> 28 == 0b1101 => Supply::Avs {
+            mv: ((rdo >> 9) & 0xfff) * AVS_RDO_VOLTAGE_UNIT_MV,
             ma: (rdo & 0x7f) * PPS_CURRENT_UNIT_MA,
         },
         _ => Supply::Raw,
@@ -331,6 +341,12 @@ pub fn describe(entry: &Entry) -> [u8; 24] {
                 .text(b"A"),
             Supply::Pps { mv, ma } => row
                 .text(b"PPS ")
+                .fixed(mv, 2)
+                .text(b"V ")
+                .fixed(ma, 2)
+                .text(b"A"),
+            Supply::Avs { mv, ma } => row
+                .text(b"AVS ")
                 .fixed(mv, 2)
                 .text(b"V ")
                 .fixed(ma, 2)
