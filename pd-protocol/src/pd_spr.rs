@@ -1535,6 +1535,17 @@ impl<L: Limits> Selection<L> {
             self.adjust_current.set(false);
         }
     }
+    /// The SPR AVS target at `mv` in the advertised range at `object`, asking
+    /// for the current that voltage allows; `None` outside the range.
+    pub fn avs_target(&self, object: u8, mv: u16) -> Option<Target> {
+        let index = usize::from(object).checked_sub(1).filter(|&i| i < 7)?;
+        let target = Target {
+            mv,
+            ma: avs_target_ma::<L>(self.avs_raw.get()[index], u32::from(mv))?,
+            supply: Supply::Avs(object),
+        };
+        self.offered(target).then_some(target)
+    }
     /// `target` is an advertised fixed option, or lies within an advertised
     /// PPS or SPR AVS range on its step, within this policy's limits.
     fn offered(&self, target: Target) -> bool {
@@ -1660,19 +1671,12 @@ impl<L: Limits> Selection<L> {
                 }
             }
             Supply::Avs(object) => {
-                let i = object as usize - 1;
                 // SPR AVS moves in 100 mV steps and asks for the current its voltage allows.
                 let step = voltage_step.next_multiple_of(AVS_VOLTAGE_STEP_MV as u16);
-                let mv = candidate
-                    .mv
-                    .saturating_add(step)
-                    .min(self.range_max_mv.get()[i]);
-                match avs_target_ma::<L>(self.avs_raw.get()[i], u32::from(mv)) {
-                    Some(ma) if mv > candidate.mv => self.candidate.set(Target {
-                        mv,
-                        ma,
-                        ..candidate
-                    }),
+                let max_mv = self.range_max_mv.get()[object as usize - 1];
+                let mv = candidate.mv.saturating_add(step).min(max_mv);
+                match self.avs_target(object, mv) {
+                    Some(target) if mv > candidate.mv => self.candidate.set(target),
                     _ => next_option(),
                 }
             }

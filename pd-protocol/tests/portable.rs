@@ -1489,5 +1489,8 @@ fn spr_avs_requests_follow_tables_6_15_and_6_22() {
         pd_spr::Supply::Fixed,
         "wraps to the first option"
     );
+    assert_eq!(selection.avs_target(3, 16_000).map(|t| t.ma), Some(2_250));
+    assert!(selection.avs_target(3, 9_050).is_none());
+    assert!(selection.avs_target(2, 15_000).is_none(), "a fixed object");
     drop(future);
 }
