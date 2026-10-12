@@ -438,7 +438,7 @@ pub fn bist_request(header: u16, bdo: u32, contract_object: u8) -> BistRequest {
 /// - VID, PID, XID and FW/HW versions from [`Limits::SINK_IDENTITY`].
 /// - Load Step 150 mA/us default, no overload/droop tolerance, no LPS/PS1/PS2
 ///   compliance, no touch-temperature standard and no batteries are claimed
-///   (the library has no battery messages).
+///   (this Sink has none to report).
 /// - Sink Modes: caller `SINK_POWER_MODES` (bits 1..4) plus PPS supported;
 ///   not AVS (the library does not decode SPR AVS yet).
 /// - SPR PDPs from [`spr_pdps`].
@@ -1141,18 +1141,23 @@ impl<L: Limits> Selection<L> {
                 .get()
                 .is_some_and(|at| self.now_ms.get() >= at)
     }
-    /// The request asked next, until all are done.
     /// The request asked next: the once-per-session list, then Get_Status
     /// whenever an Alert asked for it.
     pub fn next_query(&self) -> Option<PartnerQuery> {
+        self.listed_query()
+            .or(self.status_requested.get().then_some(PartnerQuery::Status))
+    }
+    /// The once-per-session request asked next: [`QUERIES`] in order, then the
+    /// Battery requests the SCEDB answer calls for.
+    fn listed_query(&self) -> Option<PartnerQuery> {
         QUERIES
             .get(self.query_index.get() as usize)
             .copied()
-            .or(self.status_requested.get().then_some(PartnerQuery::Status))
+            .or_else(|| self.partner.get().battery_query())
     }
     /// The current request is one of the once-per-session list (not an Alert's Get_Status).
     fn in_list(&self) -> bool {
-        (self.query_index.get() as usize) < QUERIES.len()
+        self.listed_query().is_some()
     }
     /// What the Source answered so far in this session.
     pub fn partner_info(&self) -> PartnerInfo {
@@ -1202,8 +1207,9 @@ impl<L: Limits> Selection<L> {
         self.partner.set(partner);
         self.advance_query();
     }
+    // Battery requests advance by their recorded outcome, not by the index.
     fn advance_query(&self) {
-        if self.in_list() {
+        if (self.query_index.get() as usize) < QUERIES.len() {
             self.query_index.set(self.query_index.get() + 1);
         }
         self.query_deferrals.set(0);

@@ -10,7 +10,11 @@
 //! - Get_Source_Info -> Source_Info (sections 6.3.23, 6.4.10, 7.26,
 //!   PE_SNK_Get_Source_Info 9.2.10.1.1);
 //! - Get_Status -> Status (sections 6.3.18, 6.5.3, 7.15, PE_Get_Status 9.2.11.1.1),
-//!   once per session and again after an Alert with a non-Battery event (7.14.1).
+//!   once per session and again after an Alert with a non-Battery event (7.14.1);
+//! - Get_Battery_Cap -> Battery_Capabilities and Get_Battery_Status ->
+//!   Battery_Status (sections 6.5.4..6.5.6, 6.4.4, 7.20, 7.21, PE_Get_Battery_Cap
+//!   9.2.12.1.1, PE_Get_Battery_Status 9.2.13.1.1), once per session for the
+//!   first Battery the SCEDB reports.
 //!
 //! All exist only in PD3. Each answer fits one Chunk (MaxExtendedMsgChunkLen
 //! 26 bytes), so no Chunking layer is needed.
@@ -29,6 +33,16 @@ const IOC_HIGH_PERCENT: u8 = 90;
 const MAX_BATTERIES_PER_KIND: u8 = 4;
 // EPR maximum PDP in watts (section 3.4.2).
 const EPR_MAX_W: u8 = 240;
+// Battery references: fixed Batteries 0..3, hot swappable Battery Slots 4..7
+// (Tables 6.53, 6.54).
+const FIRST_FIXED_BATTERY: u8 = 0;
+const FIRST_HOT_SWAP_BATTERY: u8 = 4;
+const LAST_BATTERY_REF: u8 = 7;
+// Battery capacity field values (Tables 6.24, 6.55): 0 no Battery, FFFFh unknown.
+const BATTERY_NOT_PRESENT: u16 = 0;
+const BATTERY_CAPACITY_UNKNOWN: u16 = 0xffff;
+// Battery Capability Data Block length in bytes (Table 6.55).
+const BCDB_LEN: usize = 9;
 
 /// The order in which a session asks, once each. Get_Status is asked again
 /// after Alerts.
@@ -192,6 +206,102 @@ impl SourceExtended {
     }
 }
 
+impl SourceExtended {
+    /// The Battery reference to ask about: the first fixed Battery, else the
+    /// first hot swappable Battery Slot (Tables 6.50, 6.53); `None` without one.
+    pub const fn first_battery(&self) -> Option<u8> {
+        if self.fixed_batteries > 0 {
+            Some(FIRST_FIXED_BATTERY)
+        } else if self.hot_swap_slots > 0 {
+            Some(FIRST_HOT_SWAP_BATTERY)
+        } else {
+            None
+        }
+    }
+}
+
+/// A Battery capacity or charge in 0.1 Wh (Tables 6.24, 6.55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capacity {
+    DeciWattHours(u16),
+    Unknown,
+}
+impl Capacity {
+    const fn decode(raw: u16) -> Self {
+        if raw == BATTERY_CAPACITY_UNKNOWN {
+            Self::Unknown
+        } else {
+            Self::DeciWattHours(raw)
+        }
+    }
+}
+
+/// Battery Capability Data Block (BCDB, Table 6.55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryCapabilities {
+    pub vid: u16,
+    pub pid: u16,
+    /// Design and Last Full Charge Capacity; `None` when no Battery is present.
+    pub design: Option<Capacity>,
+    pub last_full: Option<Capacity>,
+    /// Battery Type bit 0: the request named a Battery that does not exist.
+    pub invalid_reference: bool,
+}
+impl BatteryCapabilities {
+    /// 9 or more bytes; reserved bits are ignored. `None` if shorter.
+    pub fn decode(block: &[u8]) -> Option<Self> {
+        let block: &[u8; BCDB_LEN] = block.get(..BCDB_LEN)?.try_into().ok()?;
+        let u16_at = |i: usize| u16::from_le_bytes([block[i], block[i + 1]]);
+        let capacity = |raw: u16| (raw != BATTERY_NOT_PRESENT).then(|| Capacity::decode(raw));
+        Some(Self {
+            vid: u16_at(0),
+            pid: u16_at(2),
+            design: capacity(u16_at(4)),
+            last_full: capacity(u16_at(6)),
+            invalid_reference: block[8] & 1 != 0,
+        })
+    }
+}
+
+/// Battery Charging Status (Table 6.24 bits 11..10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Charging {
+    Charging,
+    Discharging,
+    Idle,
+}
+
+/// Battery Status Data Object (BSDO, Table 6.24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryStatus {
+    /// Battery Present Capacity (State of Charge).
+    pub present: Capacity,
+    /// Battery Present, with its Charging Status (`None` when Invalid, 11b).
+    pub battery: Option<Option<Charging>>,
+    /// The request named a Battery that does not exist.
+    pub invalid_reference: bool,
+}
+impl BatteryStatus {
+    /// Reserved bits are ignored.
+    pub const fn decode(bsdo: u32) -> Self {
+        let charging = match (bsdo >> 10) & 3 {
+            0 => Some(Charging::Charging),
+            1 => Some(Charging::Discharging),
+            2 => Some(Charging::Idle),
+            _ => None,
+        };
+        Self {
+            present: Capacity::decode((bsdo >> 16) as u16),
+            battery: if bsdo & (1 << 9) != 0 {
+                Some(charging)
+            } else {
+                None
+            },
+            invalid_reference: bsdo & (1 << 8) != 0,
+        }
+    }
+}
+
 /// Revision Message Data Object (RMDO, Table 6.31): Revision and Version of the
 /// highest PD specification the Source supports, e.g. 3.1 and 1.8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,6 +460,9 @@ pub struct PartnerInfo {
     /// The latest Get_Status outcome, and how many Status answers arrived.
     pub status: Answer<Status>,
     pub status_reads: u8,
+    /// Asked only when the SCEDB reports a Battery ([`SourceExtended::first_battery`]).
+    pub battery_capabilities: Answer<BatteryCapabilities>,
+    pub battery_status: Answer<BatteryStatus>,
 }
 impl PartnerInfo {
     pub const PENDING: Self = Self {
@@ -359,7 +472,23 @@ impl PartnerInfo {
         source_info: Answer::Pending,
         status: Answer::Pending,
         status_reads: 0,
+        battery_capabilities: Answer::Pending,
+        battery_status: Answer::Pending,
     };
+    /// The next Battery request, once each, for the first Battery the SCEDB reports.
+    pub fn battery_query(&self) -> Option<PartnerQuery> {
+        let Answer::Value(source) = self.source_extended else {
+            return None;
+        };
+        let reference = source.first_battery()?;
+        if self.battery_capabilities.is_pending() {
+            Some(PartnerQuery::BatteryCapabilities(reference))
+        } else if self.battery_status.is_pending() {
+            Some(PartnerQuery::BatteryStatus(reference))
+        } else {
+            None
+        }
+    }
     /// Record a non-value outcome for `query`.
     pub fn set(&mut self, query: PartnerQuery, outcome: Answer<()>) {
         fn map<T>(outcome: Answer<()>) -> Answer<T> {
@@ -378,6 +507,8 @@ impl PartnerInfo {
             PartnerQuery::ManufacturerInfo => self.manufacturer = map(outcome),
             PartnerQuery::SourceInfo => self.source_info = map(outcome),
             PartnerQuery::Status => self.status = map(outcome),
+            PartnerQuery::BatteryCapabilities(_) => self.battery_capabilities = map(outcome),
+            PartnerQuery::BatteryStatus(_) => self.battery_status = map(outcome),
         }
     }
     /// Record the answer block for `query`. `false` if it does not decode.
@@ -404,6 +535,16 @@ impl PartnerInfo {
                     self.status_reads = self.status_reads.saturating_add(1);
                 })
                 .is_some(),
+            PartnerQuery::BatteryCapabilities(_) => BatteryCapabilities::decode(block)
+                .map(|value| self.battery_capabilities = Answer::Value(value))
+                .is_some(),
+            PartnerQuery::BatteryStatus(_) => <[u8; 4]>::try_from(block)
+                .ok()
+                .map(|bsdo| {
+                    self.battery_status =
+                        Answer::Value(BatteryStatus::decode(u32::from_le_bytes(bsdo)))
+                })
+                .is_some(),
         }
     }
 }
@@ -418,6 +559,12 @@ pub const GET_STATUS_HEADER: u16 = 0x0092;
 /// 00110b; then Chunked Chunk 0 of 2 bytes, Target 0 (Port), Ref 0 (Table 6.56).
 pub const GET_MANUFACTURER_INFO_HEADER: u16 = 0x9086;
 pub const GET_MANUFACTURER_INFO_BODY: [u8; 4] = [0x02, 0x80, 0, 0];
+/// Get_Battery_Cap and Get_Battery_Status: Extended, one Data Object, PD3,
+/// Sink/UFP, type 00011b / 00100b; then Chunked Chunk 0 of 1 byte, the Battery
+/// reference (Tables 6.53, 6.54) and 00h padding.
+pub const GET_BATTERY_CAP_HEADER: u16 = 0x9083;
+pub const GET_BATTERY_STATUS_HEADER: u16 = 0x9084;
+const GET_BATTERY_EXTENDED_HEADER: [u8; 2] = [0x01, 0x80];
 
 /// The request an outgoing SOP Message is, if it is exactly one of them.
 pub fn query_request(bytes: &[u8]) -> Option<PartnerQuery> {
@@ -429,6 +576,16 @@ pub fn query_request(bytes: &[u8]) -> Option<PartnerQuery> {
         (GET_STATUS_HEADER, []) => Some(PartnerQuery::Status),
         (GET_MANUFACTURER_INFO_HEADER, body) if body == GET_MANUFACTURER_INFO_BODY => {
             Some(PartnerQuery::ManufacturerInfo)
+        }
+        (GET_BATTERY_CAP_HEADER, [e0, e1, reference, 0])
+            if [*e0, *e1] == GET_BATTERY_EXTENDED_HEADER && *reference <= LAST_BATTERY_REF =>
+        {
+            Some(PartnerQuery::BatteryCapabilities(*reference))
+        }
+        (GET_BATTERY_STATUS_HEADER, [e0, e1, reference, 0])
+            if [*e0, *e1] == GET_BATTERY_EXTENDED_HEADER && *reference <= LAST_BATTERY_REF =>
+        {
+            Some(PartnerQuery::BatteryStatus(*reference))
         }
         _ => None,
     }
@@ -455,7 +612,8 @@ pub enum Reply {
 /// 6.5, Table 6.48 Data Size), Manufacturer_Info 4..26 bytes (Table 6.57),
 /// Status 5..26 bytes (Table 6.51 and section 6.5), Revision exactly one RMDO
 /// (section 6.4.11), Source_Info one or more SIDOs (SIDO2 since R3.2 V1.2;
-/// objects past it are Ignored like the bytes of section 6.5).
+/// objects past it are Ignored like the bytes of section 6.5), Battery_Capabilities
+/// 9..26 bytes (Table 6.55), Battery_Status exactly one BSDO (section 6.4.4).
 pub fn query_answer(query: PartnerQuery, frame: &[u8]) -> Reply {
     let [low, high, ..] = *frame else {
         return Reply::Other;
@@ -477,6 +635,9 @@ pub fn query_answer(query: PartnerQuery, frame: &[u8]) -> Reply {
         // With no Data Object these headers are Wait and VCONN_Swap (Table 6.5).
         PartnerQuery::Revision => (false, 12, 1..=1),
         PartnerQuery::SourceInfo => (false, 11, 1..=7),
+        PartnerQuery::BatteryCapabilities(_) => (true, 5, BCDB_LEN as u16..=26),
+        // With no Data Object this header is Ping (Table 6.5).
+        PartnerQuery::BatteryStatus(_) => (false, 5, 1..=1),
     };
     if header & 0x801f != (u16::from(extended) << 15) | kind || (!extended && objects == 0) {
         return Reply::Other;
@@ -749,6 +910,116 @@ mod tests {
         assert_eq!(query_answer(Status, &status(4)), Reply::Malformed);
         assert_eq!(query_answer(Status, &chunk(0xf1a1, &[1; 25])), Reply::Other);
         // SCEDB
+    }
+
+    // Battery answers must decode the no-Battery, unknown and invalid-reference
+    // codes apart, and only the exact requests and answers may pass the gates.
+    #[test]
+    fn battery_requests_and_answers() {
+        use PartnerQuery as Q;
+        let caps =
+            BatteryCapabilities::decode(&[0x34, 0x12, 0x78, 0x56, 0xa0, 0x02, 0xff, 0xff, 0xfe])
+                .unwrap();
+        assert_eq!(
+            (
+                caps.vid,
+                caps.pid,
+                caps.design,
+                caps.last_full,
+                caps.invalid_reference
+            ),
+            (
+                0x1234,
+                0x5678,
+                Some(Capacity::DeciWattHours(672)),
+                Some(Capacity::Unknown),
+                false
+            )
+        );
+        let none = BatteryCapabilities::decode(&[0, 0, 0, 0, 0, 0, 0, 0, 1]).unwrap();
+        assert_eq!((none.design, none.invalid_reference), (None, true));
+        assert!(BatteryCapabilities::decode(&[0; 8]).is_none());
+        // 33.6 Wh, present, discharging; then no Battery at an invalid reference.
+        let status = BatteryStatus::decode(0x0150_0600);
+        assert_eq!(
+            (status.present, status.battery, status.invalid_reference),
+            (
+                Capacity::DeciWattHours(336),
+                Some(Some(Charging::Discharging)),
+                false
+            )
+        );
+        let missing = BatteryStatus::decode(0xffff_0d00);
+        assert_eq!(
+            (missing.present, missing.battery, missing.invalid_reference),
+            (Capacity::Unknown, None, true)
+        );
+
+        assert_eq!(
+            query_request(&[0x83, 0x92, 1, 0x80, 0, 0]),
+            Some(Q::BatteryCapabilities(0))
+        );
+        assert_eq!(
+            query_request(&[0x84, 0x90, 1, 0x80, 4, 0]),
+            Some(Q::BatteryStatus(4))
+        );
+        for bad in [
+            &[0x83u8, 0x92, 1, 0x80, 8, 0][..], // reference out of range
+            &[0x83, 0x92, 2, 0x80, 0, 0],       // Data Size 2
+            &[0x83, 0x92, 1, 0x80, 0, 1],       // padding
+            &[0x43, 0x92, 1, 0x80, 0, 0],       // PD2
+        ] {
+            assert_eq!(query_request(bad), None, "{bad:02x?}");
+        }
+        let bcdb = |size: usize| {
+            chunk(
+                0x80a5 | ((2 + size as u16).div_ceil(4) << 12),
+                &std::vec![0; size],
+            )
+        };
+        assert_eq!(
+            query_answer(Q::BatteryCapabilities(0), &bcdb(9)),
+            Reply::Answer
+        );
+        assert_eq!(
+            query_answer(Q::BatteryCapabilities(0), &bcdb(8)),
+            Reply::Malformed
+        );
+        assert_eq!(
+            query_answer(Q::BatteryStatus(0), &[0xa5, 0x13, 0, 6, 0x50, 0x01]),
+            Reply::Answer
+        );
+        assert_eq!(
+            query_answer(Q::BatteryStatus(0), &[0xa5, 0x23, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Reply::Malformed
+        );
+        assert_eq!(
+            query_answer(Q::BatteryStatus(0), &[0xa5, 0x03]),
+            Reply::Other
+        ); // Ping
+        assert_eq!(query_answer(Q::BatteryStatus(0), &bcdb(9)), Reply::Other);
+    }
+
+    #[test]
+    fn battery_requests_follow_the_scedb() {
+        let mut info = PartnerInfo::PENDING;
+        assert_eq!(info.battery_query(), None);
+        let mut scedb = [0u8; 25];
+        assert!(info.answer(PartnerQuery::SourceCapabilitiesExtended, &scedb));
+        assert_eq!(info.battery_query(), None); // no Battery
+        scedb[22] = 0x10; // one hot swappable Battery Slot
+        assert!(info.answer(PartnerQuery::SourceCapabilitiesExtended, &scedb));
+        assert_eq!(
+            info.battery_query(),
+            Some(PartnerQuery::BatteryCapabilities(4))
+        );
+        info.set(PartnerQuery::BatteryCapabilities(4), Answer::NotSupported);
+        assert_eq!(info.battery_query(), Some(PartnerQuery::BatteryStatus(4)));
+        assert!(info.answer(
+            PartnerQuery::BatteryStatus(4),
+            &0x0150_0600u32.to_le_bytes()
+        ));
+        assert_eq!(info.battery_query(), None);
     }
 
     #[test]
