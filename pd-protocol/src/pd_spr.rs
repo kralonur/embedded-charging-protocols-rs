@@ -848,31 +848,37 @@ pub fn request_fixed<L: Limits>(
     if first.raw_voltage() as u32 * FIXED_VOLTAGE_UNIT_MV != VSAFE5V_MV {
         return Err(Error::UnsafeCapabilities);
     }
-    let voltage = usbpd::units::ElectricPotential::new::<usbpd::_50millivolts_mod::_50millivolts>(
-        target_mv / FIXED_VOLTAGE_UNIT_MV,
-    );
-    let request::PowerSource::FixedVariableSupply(rdo) = request::PowerSource::new_fixed(
-        request::CurrentRequest::Highest,
-        request::VoltageRequest::Specific(voltage),
-        capabilities,
-    )
-    .map_err(|_| Error::UnsafeCapabilities)?
+    // The first Fixed Supply object at exactly the target voltage (Table 6.9),
+    // compared in its raw 50 mV units.
+    let Some((index, pdo)) = capabilities
+        .pdos()
+        .iter()
+        .enumerate()
+        .find_map(|(index, pdo)| match pdo {
+            source_capabilities::PowerDataObject::FixedSupply(pdo)
+                if u32::from(pdo.raw_voltage()) * FIXED_VOLTAGE_UNIT_MV == target_mv =>
+            {
+                Some((index, pdo))
+            }
+            _ => None,
+        })
     else {
         return Err(Error::UnsafeCapabilities);
     };
     // Operating = Maximum Operating Current = the object's Maximum Current, at
     // most MAX_CURRENT_MA (Table 6.19). An object below REQUEST_MA is unusable.
-    let pdo_ma = u32::from(rdo.raw_operating_current()) * FIXED_CURRENT_UNIT_MA;
-    let raw = (fixed_request_ma::<L>(pdo_ma) / FIXED_CURRENT_UNIT_MA) as u16;
-    if rdo.capability_mismatch() || pdo_ma < L::REQUEST_MA {
+    let pdo_ma = u32::from(pdo.raw_max_current()) * FIXED_CURRENT_UNIT_MA;
+    if pdo_ma < L::REQUEST_MA {
         return Err(Error::UnsafeCapabilities);
     }
-    let rdo = rdo
-        .with_raw_operating_current(raw)
-        .with_raw_max_operating_current(raw);
-    // Upstream defaults both flags to true; these facts must come from the caller.
+    let raw = (fixed_request_ma::<L>(pdo_ma) / FIXED_CURRENT_UNIT_MA) as u16;
+    // Object position 1..=7: the length check above bounds `index`.
     Ok(request::PowerSource::FixedVariableSupply(
-        rdo.with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
+        request::FixedVariableSupply(0)
+            .with_object_position(index as u8 + 1)
+            .with_raw_operating_current(raw)
+            .with_raw_max_operating_current(raw)
+            .with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
             .with_no_usb_suspend(L::NO_USB_SUSPEND),
     ))
 }
