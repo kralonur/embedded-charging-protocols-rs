@@ -4,12 +4,14 @@
 
 - Repository: <https://github.com/kralonur/usbpd>
 - Branch at selection: `feat/sink-protocol-improvements`
-- Full revision: `326123330125a74cfc75bc58a6d81e34fba97f4b`
+- Full revision: `7e9cf6888e9d6705d3f6fe3c4033b80045e524bc`
+- EPR review baseline: `9c1325e1ecf6be5f5f53be656ae3658dd7131101`
 - Fork baseline examined: `72008c424eeebd0ea271eb5794ff000b3832a134`
 - Packages: `usbpd` and `usbpd-traits`, both version `2.0.0`.
 - Toolchain: current stable Rust.
 
-The branch tip was resolved with `git ls-remote`, cloned, and reviewed locally.
+The EPR revision was committed and reviewed locally against USB PD 3.2 v1.1.
+It must be published before another machine can fetch this pin from GitHub.
 Selection is immutable: direct workspace Git dependencies pin both crates to this revision,
 and the lockfile records their Git source. `cargo tree -i usbpd-traits` confirms
 one shared trait identity for the library and engine. No local fork checkout,
@@ -34,7 +36,8 @@ message and sink-policy changes against the baseline:
   responses used by this wrapper, and escalates failed soft-reset recovery.
 
 The extracted guard independently checks outgoing RDOs/responses and incoming
-framing, never enters EPR Mode, requires automatic GoodCRC and retries, blocks
+framing, permits explicitly confirmed EPR entry when `Limits::EPR` is enabled,
+requires automatic GoodCRC and retries, blocks
 optional recovery, and ends after mandatory Hard Reset signaling. Chunk assembly
 stays off unless the caller sets `Limits::EPR_OFFER`: then an explicit request
 sends EPR_Get_Source_Cap from Ready (not standard for a Sink without EPR Mode,
@@ -46,7 +49,7 @@ cooldown, up to its unsent-attempt limit.
 ## Constraints, not general approval
 
 This is an integration review, not a USB-IF certification or exhaustive audit of
-all fork code. The fork includes source/EPR/software-retry paths not enabled by
+all fork code. The fork includes source/software-retry paths not enabled by
 this wrapper. In particular, direct fork users must not infer the wrapper's
 fail-closed guarantees: underlying reset/retry paths can loop and the bounded
 pending receive queue can drop an old message when full.
@@ -61,7 +64,21 @@ Both packages use the fork directly, rather than crates.io packages with root-sc
 patches. Downstream path-dependency consumers inherit the exact Git sources and
 need no patches in their own workspace.
 
-## Checks performed
+## EPR changes and checks
+
+Entry requires Ack then Succeeded under one continuous entry timer. Requests in
+EPR mode include the exact advertised PDO, including SPR-object requests before
+exit. Reserved actions/failure reasons are fallible. Eleven-position sink
+capabilities use bounded 26-byte chunk transmission and Chunk Request deadlines.
+Keep-alive failure causes Hard Reset; mode callbacks clear state on exit/reset.
+
+The EPR revision passed workspace check, strict all-target Clippy and nine
+`cargo test -p usbpd epr` regressions. Shared black-box sessions additionally
+exercise fixed/AVS entry, chunked sink capabilities, keep-alive, SPR-before-exit,
+entry failure and sent/received Hard Reset. Loaded hardware timing remains
+unverified; this review does not establish electrical protection.
+
+## Earlier baseline checks
 
 The selected checkout passed these targeted fork commands (53 tests total):
 

@@ -63,9 +63,14 @@ pub struct SessionPolicy {
     pub query_max_deferrals: u8,
 }
 
+mod epr;
+mod epr_wire;
+pub use epr::*;
+pub use epr_wire::EprWire;
+
 /// Caller-supplied request policy. No operating limits are chosen by the library.
-/// Fixed SPR and SPR PPS are supported, and SPR AVS when [`Limits::SPR_AVS`]
-/// is set; EPR is not.
+/// Fixed SPR and SPR PPS are supported, SPR AVS when [`Limits::SPR_AVS`]
+/// is set, and EPR fixed/AVS when [`Limits::EPR`] is set.
 pub trait Limits {
     /// Identity advertised by this port, supplied explicitly by the caller.
     const SINK_IDENTITY: SinkIdentity;
@@ -105,6 +110,9 @@ pub trait Limits {
     /// chunking layer: another multi-Chunk Message then fails closed at the
     /// gates instead of getting Not_Supported (section 7.31.15).
     const EPR_OFFER: bool = false;
+    /// Enter EPR mode and request EPR fixed/AVS supplies within caller limits.
+    /// Off by default; informational EPR offers alone do not enable entry.
+    const EPR: bool = false;
     /// Request SPR AVS (PD3, section 6.4.1.3.10): advertise it in
     /// Sink_Capabilities and the SKEDB, list the Source's SPR AVS ranges and
     /// request them. The range ends at 20 V when `MAX_REQUEST_MV` allows it,
@@ -468,6 +476,13 @@ pub fn sink_capabilities_extended<L: Limits>() -> Option<[u8; 24]> {
     block[18] = minimum;
     block[19] = operational;
     block[20] = maximum;
+    if L::EPR {
+        let (minimum, operational, maximum) = epr_pdps::<L>()?;
+        block[17] |= 1 << 5; // AVS supported, Table 6.61.
+        block[21] = minimum;
+        block[22] = operational;
+        block[23] = maximum;
+    }
     Some(block)
 }
 
@@ -592,14 +607,6 @@ pub fn sink_capabilities<L: Limits>(pd3: bool) -> Option<([u32; MAX_OBJECTS], us
         last = mv;
     }
     let pps_mv = pps_ceiling_mv::<L>();
-    if pd3 && L::MIN_PPS_MV <= VSAFE5V_MV && pps_mv >= VSAFE5V_MV {
-        let ma = pps_ceiling_ma::<L>(pps_mv as u16) as u32;
-        objects[count] = PPS_APDO_TYPE
-            | ((pps_mv / PPS_PDO_VOLTAGE_UNIT_MV) << 17)
-            | ((VSAFE5V_MV / PPS_PDO_VOLTAGE_UNIT_MV) << 8)
-            | (ma / PPS_CURRENT_UNIT_MA);
-        count += 1;
-    }
     let avs_mv = avs_ceiling_mv::<L>();
     if pd3 && avs_mv != 0 {
         let unit = |mv: u32| {
@@ -612,6 +619,15 @@ pub fn sink_capabilities<L: Limits>(pd3: bool) -> Option<([u32; MAX_OBJECTS], us
             0
         };
         objects[count] = AVS_APDO_TYPE | (unit(SPR_AVS_15V_MAX_MV) << 10) | high;
+        count += 1;
+    }
+    // Section 6.4.1.4: SPR AVS precedes PPS in both the SPR and EPR prefix.
+    if pd3 && L::MIN_PPS_MV <= VSAFE5V_MV && pps_mv >= VSAFE5V_MV {
+        let ma = pps_ceiling_ma::<L>(pps_mv as u16) as u32;
+        objects[count] = PPS_APDO_TYPE
+            | ((pps_mv / PPS_PDO_VOLTAGE_UNIT_MV) << 17)
+            | ((VSAFE5V_MV / PPS_PDO_VOLTAGE_UNIT_MV) << 8)
+            | (ma / PPS_CURRENT_UNIT_MA);
         count += 1;
     }
     Some((objects, count))
@@ -668,6 +684,7 @@ fn request_raw(request: &request::PowerSource) -> Option<u32> {
         request::PowerSource::FixedVariableSupply(rdo) => Some(rdo.0),
         request::PowerSource::Pps(rdo) => Some(rdo.0),
         request::PowerSource::Avs(rdo) => Some(rdo.0),
+        request::PowerSource::EprRequest(request) => Some(request.rdo),
         _ => None,
     }
 }
@@ -737,6 +754,7 @@ pub fn request_pps<L: Limits>(
             .with_object_position(object)
             .with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
             .with_no_usb_suspend(L::NO_USB_SUSPEND)
+            .with_epr_mode_capable(L::EPR)
             .with_raw_output_voltage(mv / PPS_RDO_VOLTAGE_UNIT_MV as u16)
             .with_raw_operating_current(ma / PPS_CURRENT_UNIT_MA as u16),
     ))
@@ -814,6 +832,7 @@ pub fn request_avs<L: Limits>(
             .with_object_position(object)
             .with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
             .with_no_usb_suspend(L::NO_USB_SUSPEND)
+            .with_epr_mode_capable(L::EPR)
             .with_raw_output_voltage(mv / AVS_RDO_VOLTAGE_UNIT_MV as u16)
             .with_raw_operating_current(ma / PPS_CURRENT_UNIT_MA as u16),
     ))
@@ -879,14 +898,17 @@ pub fn request_fixed<L: Limits>(
             .with_raw_operating_current(raw)
             .with_raw_max_operating_current(raw)
             .with_usb_communications_capable(L::USB_COMMUNICATIONS_CAPABLE)
-            .with_no_usb_suspend(L::NO_USB_SUSPEND),
+            .with_no_usb_suspend(L::NO_USB_SUSPEND)
+            .with_epr_mode_capable(L::EPR),
     ))
 }
 
 /// RDO bits 25 (USB Communications Capable) and 24 (No USB Suspend) from the
 /// caller facts; every other flag in bits 27..20 must be clear (Tables 6.19, 6.21).
 fn rdo_flags<L: Limits>() -> u32 {
-    u32::from(L::USB_COMMUNICATIONS_CAPABLE) << 25 | u32::from(L::NO_USB_SUSPEND) << 24
+    u32::from(L::USB_COMMUNICATIONS_CAPABLE) << 25
+        | u32::from(L::NO_USB_SUSPEND) << 24
+        | if L::EPR { EPR_RDO_CAPABLE } else { 0 }
 }
 
 /// Independent raw-RDO check for a transport before committing actual TX.
@@ -1025,7 +1047,7 @@ impl Supply {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub mv: u16,
     /// PPS: the Operating Current limit; Fixed and SPR AVS: what the request asks for.
@@ -1055,12 +1077,12 @@ impl Target {
 /// native RX is parked between complete transactions. One owner, no allocation.
 pub struct Selection<L: Limits> {
     limits: PhantomData<L>,
-    options: Cell<[Target; 7]>,
+    options: Cell<[Target; EPR_OBJECTS]>,
     // Per object position: the APDO range's highest requested voltage, the
     // PPS Maximum Current, and the raw SPR AVS APDO its currents come from.
-    range_max_mv: Cell<[u16; 7]>,
-    pps_max_ma: Cell<[u16; 7]>,
-    avs_raw: Cell<[u32; 7]>,
+    range_max_mv: Cell<[u16; EPR_OBJECTS]>,
+    pps_max_ma: Cell<[u16; EPR_OBJECTS]>,
+    avs_raw: Cell<[u32; EPR_OBJECTS]>,
     peer_revision: Cell<u8>,
     now_ms: Cell<u64>,
     next_pps_ms: Cell<Option<u64>>,
@@ -1099,16 +1121,21 @@ pub struct Selection<L: Limits> {
     epr_capable: Cell<bool>,
     epr_offer: Cell<EprOffer>,
     epr_deferrals: Cell<u8>,
+    epr_state: Cell<EprState>,
+    epr_target: Cell<Option<Target>>,
+    epr_exit: Cell<bool>,
+    epr_enter_armed: Cell<bool>,
+    epr_exit_armed: Cell<bool>,
     waker: RefCell<Option<Waker>>,
 }
 impl<L: Limits> Selection<L> {
     pub const fn new() -> Self {
         Self {
             limits: PhantomData,
-            options: Cell::new([Target::fixed(0, L::REQUEST_MA as u16); 7]),
-            range_max_mv: Cell::new([0; 7]),
-            pps_max_ma: Cell::new([0; 7]),
-            avs_raw: Cell::new([0; 7]),
+            options: Cell::new([Target::fixed(0, L::REQUEST_MA as u16); EPR_OBJECTS]),
+            range_max_mv: Cell::new([0; EPR_OBJECTS]),
+            pps_max_ma: Cell::new([0; EPR_OBJECTS]),
+            avs_raw: Cell::new([0; EPR_OBJECTS]),
             peer_revision: Cell::new(0),
             now_ms: Cell::new(0),
             next_pps_ms: Cell::new(None),
@@ -1142,6 +1169,11 @@ impl<L: Limits> Selection<L> {
             epr_capable: Cell::new(false),
             epr_offer: Cell::new(EprOffer::NotAsked),
             epr_deferrals: Cell::new(0),
+            epr_state: Cell::new(EprState::Spr),
+            epr_target: Cell::new(None),
+            epr_exit: Cell::new(false),
+            epr_enter_armed: Cell::new(false),
+            epr_exit_armed: Cell::new(false),
             waker: RefCell::new(None),
         }
     }
@@ -1175,14 +1207,19 @@ impl<L: Limits> Selection<L> {
         self.partner.set(PartnerInfo::PENDING);
         self.epr_capable.set(false);
         self.epr_offer.set(EprOffer::NotAsked);
+        self.epr_state.set(EprState::Spr);
+        self.epr_target.set(None);
+        self.epr_exit.set(false);
+        self.epr_enter_armed.set(false);
+        self.epr_exit_armed.set(false);
         self.query_index.set(0);
         self.query_deferrals.set(0);
         self.status_requested.set(false);
         self.options
-            .set([Target::fixed(0, L::REQUEST_MA as u16); 7]);
-        self.range_max_mv.set([0; 7]);
-        self.pps_max_ma.set([0; 7]);
-        self.avs_raw.set([0; 7]);
+            .set([Target::fixed(0, L::REQUEST_MA as u16); EPR_OBJECTS]);
+        self.range_max_mv.set([0; EPR_OBJECTS]);
+        self.pps_max_ma.set([0; EPR_OBJECTS]);
+        self.avs_raw.set([0; EPR_OBJECTS]);
         self.now_ms.set(0);
         self.target
             .set(Target::fixed(VSAFE5V_MV as u16, L::REQUEST_MA as u16));
@@ -1286,6 +1323,7 @@ impl<L: Limits> Selection<L> {
             && !self.has_pending()
             && !self.cable_active.get()
             && self.peer_revision.get() == 2
+            && self.epr_state.get() != EprState::Active
             && matches!(self.target.get().supply, Supply::Pps(_))
             && self.established.get() == Some(self.target.get())
             && self
@@ -1340,6 +1378,28 @@ impl<L: Limits> Selection<L> {
     }
     pub fn epr_offer(&self) -> EprOffer {
         self.epr_offer.get()
+    }
+    pub fn epr_state(&self) -> EprState {
+        self.epr_state.get()
+    }
+    pub fn epr_enter_armed(&self) -> bool {
+        self.epr_enter_armed.get()
+    }
+    pub fn epr_exit_armed(&self) -> bool {
+        self.epr_exit_armed.get()
+    }
+    /// Leave EPR through an SPR 5 V contract before stopping PD servicing.
+    pub fn request_epr_exit(&self) -> bool {
+        if self.epr_state.get() != EprState::Active
+            || self.request_in_flight.get()
+            || self.has_pending()
+        {
+            return false;
+        }
+        self.epr_exit.set(true);
+        self.pending
+            .set(Some(Target::fixed(VSAFE5V_MV as u16, L::REQUEST_MA as u16)));
+        true
     }
     /// Ask for the Source's EPR offer once more, from an established PD3
     /// contract with an EPR Mode capable Source ([`Limits::EPR_OFFER`]).
@@ -1435,7 +1495,10 @@ impl<L: Limits> Selection<L> {
     }
     /// Explicit discovery, only from PD3 fixed 5V; never from PPS.
     pub fn request_cable(&self) -> bool {
-        if self.target.get() != Target::fixed(VSAFE5V_MV as u16, L::REQUEST_MA as u16)
+        if matches!(
+            self.epr_state.get(),
+            EprState::Active | EprState::Entering | EprState::Exiting
+        ) || self.target.get() != Target::fixed(VSAFE5V_MV as u16, L::REQUEST_MA as u16)
             || self.candidate.get() != self.target.get()
             || self.peer_revision.get() != 2
             || self.has_pending()
@@ -1470,12 +1533,46 @@ impl<L: Limits> Selection<L> {
         }
     }
     fn advertise(&self, capabilities: &source_capabilities::SourceCapabilities) {
-        let mut options = [Target::fixed(0, L::REQUEST_MA as u16); 7];
-        let mut range_max_mv = [0; 7];
-        let mut pps_max_ma = [0; 7];
-        let mut avs_raw = [0; 7];
+        let combined;
+        let capabilities = if L::EPR
+            && capabilities.pdos().len() <= MAX_OBJECTS
+            && let EprOffer::Received(objects) = self.epr_offer.get()
+        {
+            combined = source_capabilities::SourceCapabilities::new_with_pdos(
+                capabilities
+                    .pdos()
+                    .iter()
+                    .copied()
+                    .chain(
+                        (capabilities.pdos().len()..MAX_OBJECTS)
+                            .map(|_| source_capabilities::parse_raw_pdo(0)),
+                    )
+                    .chain(
+                        objects[MAX_OBJECTS..]
+                            .iter()
+                            .copied()
+                            .map(source_capabilities::parse_raw_pdo),
+                    )
+                    .collect(),
+            );
+            &combined
+        } else {
+            capabilities
+        };
+        let mut options = [Target::fixed(0, L::REQUEST_MA as u16); EPR_OBJECTS];
+        let mut range_max_mv = [0; EPR_OBJECTS];
+        let mut pps_max_ma = [0; EPR_OBJECTS];
+        let mut avs_raw = [0; EPR_OBJECTS];
         let mut count = 0;
-        for (index, pdo) in capabilities.pdos().iter().enumerate() {
+        let spr_capabilities = source_capabilities::SourceCapabilities::new_with_pdos(
+            capabilities
+                .pdos()
+                .iter()
+                .take(MAX_OBJECTS)
+                .copied()
+                .collect(),
+        );
+        for (index, pdo) in capabilities.pdos().iter().take(EPR_OBJECTS).enumerate() {
             if let source_capabilities::PowerDataObject::FixedSupply(pdo) = pdo {
                 let mv = pdo.raw_voltage() as u32 * FIXED_VOLTAGE_UNIT_MV;
                 if L::FIXED_TARGETS.contains(&(mv as u16))
@@ -1500,8 +1597,8 @@ impl<L: Limits> Selection<L> {
                 if self.peer_revision.get() == 2
                     && min <= max
                     && max_ma >= PPS_MIN_MA
-                    && count < 7
-                    && request_pps::<L>(capabilities, index as u8 + 1, min, start_ma).is_ok()
+                    && count < EPR_OBJECTS
+                    && request_pps::<L>(&spr_capabilities, index as u8 + 1, min, start_ma).is_ok()
                 {
                     options[count] = Target {
                         mv: min,
@@ -1516,7 +1613,7 @@ impl<L: Limits> Selection<L> {
                 source_capabilities::Augmented::SprAvs(pdo),
             ) = pdo
                 && self.peer_revision.get() == 2
-                && count < 7
+                && count < EPR_OBJECTS
                 && let Some((max_mv, _, _)) = avs_apdo(pdo.0)
                 && let Some(ma) = avs_target_ma::<L>(pdo.0, SPR_AVS_MIN_MV)
             {
@@ -1528,6 +1625,25 @@ impl<L: Limits> Selection<L> {
                 range_max_mv[index] = max_mv.min(avs_ceiling_mv::<L>()) as u16;
                 avs_raw[index] = pdo.0;
                 count += 1;
+            } else if let source_capabilities::PowerDataObject::Augmented(
+                source_capabilities::Augmented::Epr(pdo),
+            ) = pdo
+                && index >= MAX_OBJECTS
+                && count < EPR_OBJECTS
+                && L::EPR
+            {
+                let min = ((pdo.0 >> 8 & 0xff) * PPS_PDO_VOLTAGE_UNIT_MV).max(EPR_AVS_MIN_MV);
+                if let Some(ma) = epr_avs_target_ma::<L>(pdo.0, min) {
+                    options[count] = Target {
+                        mv: min as u16,
+                        ma,
+                        supply: Supply::Avs(index as u8 + 1),
+                    };
+                    range_max_mv[index] = (((pdo.0 >> 17 & 0x1ff) * PPS_PDO_VOLTAGE_UNIT_MV)
+                        .min(L::MAX_REQUEST_MV)) as u16;
+                    avs_raw[index] = pdo.0;
+                    count += 1;
+                }
             }
         }
         self.epr_capable.set(capabilities.epr_mode_capable());
@@ -1544,10 +1660,16 @@ impl<L: Limits> Selection<L> {
     /// The SPR AVS target at `mv` in the advertised range at `object`, asking
     /// for the current that voltage allows; `None` outside the range.
     pub fn avs_target(&self, object: u8, mv: u16) -> Option<Target> {
-        let index = usize::from(object).checked_sub(1).filter(|&i| i < 7)?;
+        let index = usize::from(object)
+            .checked_sub(1)
+            .filter(|&i| i < EPR_OBJECTS)?;
         let target = Target {
             mv,
-            ma: avs_target_ma::<L>(self.avs_raw.get()[index], u32::from(mv))?,
+            ma: if index >= MAX_OBJECTS {
+                epr_avs_target_ma::<L>(self.avs_raw.get()[index], u32::from(mv))?
+            } else {
+                avs_target_ma::<L>(self.avs_raw.get()[index], u32::from(mv))?
+            },
             supply: Supply::Avs(object),
         };
         self.offered(target).then_some(target)
@@ -1555,7 +1677,11 @@ impl<L: Limits> Selection<L> {
     /// `target` is an advertised fixed option, or lies within an advertised
     /// PPS or SPR AVS range on its step, within this policy's limits.
     fn offered(&self, target: Target) -> bool {
-        let index = |object: u8| usize::from(object).checked_sub(1).filter(|&i| i < 7);
+        let index = |object: u8| {
+            usize::from(object)
+                .checked_sub(1)
+                .filter(|&i| i < EPR_OBJECTS)
+        };
         self.options.get()[..self.count.get()]
             .iter()
             .any(|option| match target.supply {
@@ -1573,8 +1699,11 @@ impl<L: Limits> Selection<L> {
                 Supply::Avs(object) => index(object).is_some_and(|i| {
                     option.supply == target.supply
                         && target.mv <= self.range_max_mv.get()[i]
-                        && avs_target_ma::<L>(self.avs_raw.get()[i], u32::from(target.mv))
-                            == Some(target.ma)
+                        && (if i >= MAX_OBJECTS {
+                            epr_avs_target_ma::<L>(self.avs_raw.get()[i], u32::from(target.mv))
+                        } else {
+                            avs_target_ma::<L>(self.avs_raw.get()[i], u32::from(target.mv))
+                        }) == Some(target.ma)
                 }),
             })
     }
@@ -1589,7 +1718,11 @@ impl<L: Limits> Selection<L> {
     }
     /// Set a preview from semantic values, not buttons; confirmation is separate.
     pub fn preview(&self, target: Target) -> bool {
-        if self.has_pending() || self.request_in_flight.get() || self.cable_active() {
+        if matches!(self.epr_state.get(), EprState::Entering | EprState::Exiting)
+            || self.has_pending()
+            || self.request_in_flight.get()
+            || self.cable_active()
+        {
             return false;
         }
         let valid = self.offered(target);
@@ -1601,7 +1734,8 @@ impl<L: Limits> Selection<L> {
     }
     /// Explicitly confirm a preview; browsing alone never schedules transmission.
     pub fn confirm(&self) -> bool {
-        if self.has_pending()
+        if matches!(self.epr_state.get(), EprState::Entering | EprState::Exiting)
+            || self.has_pending()
             || self.request_in_flight.get()
             || self.cable_active()
             || self.rejected.get()
@@ -1770,6 +1904,8 @@ struct State<'a, L: Limits> {
     epr_query: bool,
     epr_pending: bool,
     epr_chunk: u8,
+    epr_wire: EprWire,
+    epr_active: bool,
     selected: Option<Contract>,
     established: Option<Contract>,
     outcome: Option<Result<Contract, Error>>,
@@ -1780,6 +1916,13 @@ struct State<'a, L: Limits> {
 }
 impl<L: Limits> State<'_, L> {
     fn fail(&mut self, error: Error) {
+        if matches!(error, Error::HardResetReceived | Error::HardResetSent) {
+            self.epr_active = false;
+            self.epr_wire = EprWire::new();
+            if let Some(selection) = self.selection {
+                selection.epr_state.set(EprState::Spr);
+            }
+        }
         if self.outcome.is_none() {
             self.outcome = Some(Err(error));
         }
@@ -1789,6 +1932,7 @@ impl<L: Limits> State<'_, L> {
     /// requests the established target again, or the initial target before one.
     fn begin_reset(&mut self, reset: Reset) {
         self.reset = reset;
+        self.epr_wire.soft_reset();
         self.request_in_flight = false;
         self.transitioning = false;
         self.caps_reply = false;
@@ -1923,6 +2067,8 @@ impl<L: Limits> Trial<L> {
             epr_query: false,
             epr_pending: false,
             epr_chunk: 0,
+            epr_wire: EprWire::new(),
+            epr_active: false,
             selected: None,
             established: None,
             outcome: None,
@@ -1960,7 +2106,8 @@ impl<L: Limits> Trial<L> {
 
     /// Run a maintained session that enters Ready and handles incoming source traffic.
     /// Services reviewed Soft_Reset exchanges and mandatory Hard Reset cases;
-    /// blocks optional recovery, EPR and unreviewed requests. A Hard Reset ends
+    /// blocks optional recovery and unreviewed requests. EPR requires caller
+    /// opt-in and explicit confirmation. A Hard Reset ends
     /// the session; transition to default remains caller-owned.
     /// Updates `trace` with contract and counters.
     pub async fn run_maintained<D: Driver, T: Timer>(
@@ -2023,6 +2170,8 @@ impl<L: Limits> Trial<L> {
             epr_query: false,
             epr_pending: false,
             epr_chunk: 0,
+            epr_wire: EprWire::new(),
+            epr_active: false,
             selected: None,
             established: None,
             outcome: None,
@@ -2062,9 +2211,8 @@ struct Policy<'a, 'b, L: Limits> {
 }
 impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
     // Only EPR_Source_Capabilities needs the chunking layer (`Limits::EPR_OFFER`).
-    const CHUNKING: bool = L::EPR_OFFER;
-    // Fixed/PPS SPR only; the profile does not support EPR.
-    const EPR: bool = false;
+    const CHUNKING: bool = L::EPR_OFFER || L::EPR;
+    const EPR: bool = L::EPR;
 
     fn revision(&self) -> u32 {
         REVISION_DATA_OBJECT
@@ -2150,6 +2298,18 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
             selection.begin_request();
             selection.advertise(capabilities);
         }
+        if self.shared.borrow().epr_active
+            && let Some(selection) = selection
+        {
+            if let Some(target) = selection.epr_target.take() {
+                selection.target.set(target);
+            }
+            let mut objects = [0; EPR_OBJECTS];
+            for (object, pdo) in objects.iter_mut().zip(capabilities.pdos()) {
+                *object = pdo.to_raw();
+            }
+            selection.epr_offer.set(EprOffer::Received(objects));
+        }
         let target = selection.map_or(
             Target::fixed(L::TARGET_MV as u16, L::REQUEST_MA as u16),
             |selection| selection.target.get(),
@@ -2159,7 +2319,12 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
             self.shared.borrow_mut().fail(Error::UnsafeCapabilities);
             return pending().await;
         }
-        match target.request::<L>(capabilities) {
+        let requested = if self.shared.borrow().epr_active {
+            request_epr::<L>(capabilities, target)
+        } else {
+            target.request::<L>(capabilities)
+        };
+        match requested {
             Ok(request) => {
                 // Target::request only constructs fixed, PPS or SPR AVS requests.
                 self.shared.borrow_mut().selected = Some(Contract {
@@ -2436,6 +2601,17 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
                 selection.set_rx_idle(false);
                 return Poll::Ready(Event::DiscoverCable);
             }
+            if self.shared.borrow().epr_active && selection.epr_exit.get()
+                && selection.established_target().is_some_and(|target| match target.supply {
+                    Supply::Fixed => target.mv <= SPR_FIXED_MAX_MV as u16,
+                    Supply::Pps(object) | Supply::Avs(object) => usize::from(object) <= MAX_OBJECTS,
+                })
+                && !selection.request_in_flight() && !selection.has_pending() {
+                selection.epr_exit_armed.set(true);
+                selection.epr_state.set(EprState::Exiting);
+                selection.set_rx_idle(false);
+                return Poll::Ready(Event::ExitEprMode);
+            }
             let target = match selection.pending.take() {
                 Some(target) => target,
                 None if selection.refresh_due() => selection.target.get(),
@@ -2509,7 +2685,20 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
                 }
                 None => return Poll::Pending,
             };
-            match target.request::<L>(capabilities) {
+            let needs_epr = u32::from(target.mv) > SPR_FIXED_MAX_MV
+                || matches!(target.supply, Supply::Avs(object) if usize::from(object) > MAX_OBJECTS);
+            if needs_epr && !self.shared.borrow().epr_active {
+                if !L::EPR || !selection.epr_capable() { return Poll::Pending; }
+                selection.epr_target.set(Some(target));
+                selection.epr_state.set(EprState::Entering);
+                selection.epr_enter_armed.set(true);
+                selection.set_rx_idle(false);
+                return Poll::Ready(Event::enter_epr_mode(epr_pdps::<L>().map_or(0, |(_, operational, _)| operational)));
+            }
+            if self.shared.borrow().epr_active && !needs_epr { selection.epr_exit.set(true); }
+            let requested = if self.shared.borrow().epr_active { request_epr::<L>(capabilities, target) }
+                else { target.request::<L>(capabilities) };
+            match requested {
                 Ok(request) => {
                     selection.target.set(target);
                     selection.begin_request();
@@ -2531,6 +2720,66 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
             }
         })
         .await
+    }
+
+    async fn epr_mode_changed(&mut self, active: bool) {
+        let mut state = self.shared.borrow_mut();
+        state.epr_active = active;
+        if let Some(selection) = state.selection {
+            selection.epr_state.set(if active {
+                EprState::Active
+            } else {
+                EprState::Spr
+            });
+            selection.epr_enter_armed.set(false);
+            selection.epr_exit_armed.set(false);
+            if !active {
+                selection.epr_exit.set(false);
+            }
+        }
+    }
+    async fn epr_mode_entry_failed(
+        &mut self,
+        reason: usbpd::protocol_layer::message::data::epr_mode::DataEnterFailed,
+    ) {
+        let mut state = self.shared.borrow_mut();
+        if let Some(selection) = state.selection {
+            selection.epr_state.set(EprState::Failed(u8::from(reason)));
+            selection.epr_enter_armed.set(false);
+            selection.epr_target.set(None);
+        }
+        state.protocol_error();
+    }
+    async fn epr_mode_entry_aborted(&mut self, deferred: bool) {
+        let mut state = self.shared.borrow_mut();
+        state.epr_wire = EprWire::new();
+        if let Some(selection) = state.selection {
+            selection.epr_state.set(if deferred {
+                EprState::Deferred
+            } else {
+                EprState::Timeout
+            });
+            selection.epr_enter_armed.set(false);
+            selection.epr_target.set(None);
+        }
+        if !deferred {
+            state.protocol_error();
+        }
+    }
+    fn epr_sink_capabilities(&self) -> sink_capabilities::SinkCapabilities {
+        use sink_capabilities::{FixedSupply, SinkPowerDataObject, SprPps};
+        let mut caps = sink_capabilities::SinkCapabilities::default();
+        if let Some((objects, count)) = epr_sink_capabilities::<L>() {
+            for raw in objects.into_iter().take(count) {
+                let pdo = match raw & PPS_APDO_TYPE_MASK {
+                    0xd000_0000 => SinkPowerDataObject::EprAvs(raw),
+                    0xc000_0000 | 0xe000_0000 => SinkPowerDataObject::Pps(SprPps(raw)),
+                    _ => SinkPowerDataObject::FixedSupply(FixedSupply(raw)),
+                };
+                caps.0.push(pdo).ok();
+            }
+        }
+        caps
     }
 
     async fn cable_report(&mut self, report: usbpd_traits::CableReport) {
@@ -2677,7 +2926,10 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                 && (state.sent || state.reset == Reset::Capabilities && state.hard_reset_armed)
                 && (state.hard_reset_armed
                     || (state.reset == Reset::Idle && state.request_in_flight)
-                    || state.reset == Reset::AwaitAccept)
+                    || state.reset == Reset::AwaitAccept
+                    || state.epr_wire.awaiting_keep_alive()
+                    || state.epr_wire.awaiting_capabilities()
+                    || state.epr_wire.awaiting_exit())
         };
         if !allowed {
             self.shared.borrow_mut().fail(Error::RecoveryBlocked);
@@ -2700,31 +2952,52 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
         pending().await
     }
     async fn transmit(&mut self, bytes: &[u8]) -> Result<(), DriverTxError> {
-        let is_request = bytes.len() == 6
-            && bytes[1] & 0x80 == 0
-            && Message::from_bytes(bytes).ok().is_some_and(|m| {
-                if !matches!(
-                    m.header.message_type(),
-                    MessageType::Data(DataMessageType::Request)
-                ) || !matches!(m.header.port_power_role(), usbpd::PowerRole::Sink)
-                {
-                    return false;
-                }
-                let state = self.shared.borrow();
-                let Some(selected) = &state.selected else {
-                    return false;
-                };
-                let parsed = Data::parse_message(
-                    Message::new(m.header),
-                    DataMessageType::Request,
-                    &bytes[2..],
-                    &selected.capabilities,
-                )
-                .ok();
-                matches!(parsed.and_then(|m| m.payload),
+        if bytes.len() == HEADER_BYTES
+            && u16::from_le_bytes([bytes[0], bytes[1]]) & HEADER_KIND_COUNT_MASK
+                == ControlMessageType::SoftReset as u16
+            && self.shared.borrow().epr_wire.awaiting_sink_chunk()
+        {
+            self.shared.borrow_mut().protocol_error();
+        }
+        let is_epr_power = bytes.len() == 10 && {
+            let state = self.shared.borrow();
+            state.epr_active
+                && state.epr_wire.ready()
+                && state.selection.is_some_and(|selection| {
+                    review_epr_request::<L>(state.epr_wire.objects(), bytes, selection.target.get())
+                })
+                && state
+                    .selected
+                    .as_ref()
+                    .is_some_and(|selected| bytes[2..6] == selected.request.0.to_le_bytes())
+        };
+        let is_request = is_epr_power
+            || !self.shared.borrow().epr_active
+                && bytes.len() == 6
+                && bytes[1] & 0x80 == 0
+                && Message::from_bytes(bytes).ok().is_some_and(|m| {
+                    if !matches!(
+                        m.header.message_type(),
+                        MessageType::Data(DataMessageType::Request)
+                    ) || !matches!(m.header.port_power_role(), usbpd::PowerRole::Sink)
+                    {
+                        return false;
+                    }
+                    let state = self.shared.borrow();
+                    let Some(selected) = &state.selected else {
+                        return false;
+                    };
+                    let parsed = Data::parse_message(
+                        Message::new(m.header),
+                        DataMessageType::Request,
+                        &bytes[2..],
+                        &selected.capabilities,
+                    )
+                    .ok();
+                    matches!(parsed.and_then(|m| m.payload),
                     Some(Payload::Data(Data::Request(request)))
                     if request_raw(&request) == Some(selected.request.0))
-            });
+                });
         let is_unsupported_reply = self.shared.borrow().mode == Mode::Maintained
             && bytes.len() == 2
             && Message::from_bytes(bytes).ok().is_some_and(|m| {
@@ -2903,10 +3176,28 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                     MessageType::Control(ControlMessageType::SoftReset)
                 )
             });
+        let is_epr_signal = {
+            let mut state = self.shared.borrow_mut();
+            let enter = state.selection.is_some_and(Selection::epr_enter_armed);
+            let exit = state.selection.is_some_and(Selection::epr_exit_armed)
+                && state
+                    .established
+                    .as_ref()
+                    .is_some_and(|contract| contract.request.0 >> 28 <= MAX_OBJECTS as u32);
+            state.mode == Mode::Maintained
+                && state.reset == Reset::Idle
+                && state.epr_wire.transmit::<L>(bytes, enter, exit)
+        };
         let mode = self.shared.borrow().mode;
         // Only a Ready-originated Request or Get_PPS_Status (the first Message
         // of a Sink-initiated AMS) may come back Deferred (section 7.2).
-        let ams_start = is_sink_alert
+        let ams_start = is_epr_signal
+            && bytes.len() == 6
+            && matches!(
+                u16::from_le_bytes([bytes[0], bytes[1]]) & HEADER_WITHOUT_ID_MASK,
+                0x108a | 0x9090
+            )
+            || is_sink_alert
             || is_pps_status_query
             || query_request.is_some()
             || is_epr_request
@@ -2949,7 +3240,7 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
             } else if is_epr_request {
                 state.epr_query = false;
                 state.epr_pending = true;
-            } else if is_epr_chunk_request {
+            } else if is_epr_chunk_request || is_epr_signal {
             } else if is_reset_accept {
                 state.reset = Reset::Capabilities;
                 state.recovering = true;
@@ -3007,6 +3298,10 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                         selection.epr_offer.set(EprOffer::NotSent);
                     }
                 }
+                Err(DriverTxError::Deferred)
+            }
+            Err(DriverTxError::Deferred) if is_epr_signal => {
+                self.shared.borrow_mut().epr_wire.deferred_enter();
                 Err(DriverTxError::Deferred)
             }
             Err(DriverTxError::Deferred) if ams_start => {
@@ -3131,6 +3426,12 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
             length == 2 + objects * 4 && Message::from_bytes(&buffer[..length]).is_ok()
         };
         let same_revision = ((header >> 6) & 3) as u8 == revision;
+        if L::EPR && framed {
+            let mut state = self.shared.borrow_mut();
+            if state.epr_wire.duplicate(&buffer[..length]) && (!state.sent || same_revision) {
+                return Ok(length);
+            }
+        }
         if maintained && header & HEADER_KIND_COUNT_MASK == ControlMessageType::SoftReset as u16 {
             // PE_SNK_Soft_Reset from any state (section 9.2.5.2.2): Control,
             // MessageID 0 (section 7.7). Before the first Request, use the reset's
@@ -3164,6 +3465,58 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
             } else {
                 pending().await
             };
+        }
+        if L::EPR && framed && same_revision && !self.shared.borrow().request_in_flight {
+            let mut state = self.shared.borrow_mut();
+            let was_active = state.epr_wire.active();
+            let exit = header & HEADER_KIND_COUNT_MASK == 0x100a && length == 6 && buffer[5] == 5;
+            if exit
+                && was_active
+                && state
+                    .established
+                    .as_ref()
+                    .is_some_and(|contract| contract.request.0 >> 28 > MAX_OBJECTS as u32)
+            {
+                state.require_hard_reset();
+                return Ok(length);
+            }
+            if state.epr_wire.receive(&buffer[..length]) {
+                if header & HEADER_KIND_MASK == EPR_SOURCE_CAPABILITIES_KIND {
+                    // The first valid capability Chunk completes reset framing;
+                    // subsequent Chunk requests are part of this Source AMS.
+                    if state.reset == Reset::Capabilities {
+                        state.reset = Reset::Idle;
+                    }
+                    if state.epr_wire.ready() {
+                        let objects = state.epr_wire.objects();
+                        let caps = source_capabilities::SourceCapabilities::new_with_pdos(
+                            objects
+                                .into_iter()
+                                .map(source_capabilities::parse_raw_pdo)
+                                .collect(),
+                        );
+                        if caps.has_epr_pdo_in_spr_positions() {
+                            state.require_hard_reset();
+                        } else {
+                            state.caps_reply = true;
+                        }
+                    }
+                } else if header & HEADER_KIND_MASK == DataMessageType::SourceCapabilities as u16 {
+                    state.caps_reply = true;
+                }
+                return Ok(length);
+            }
+            if state.epr_wire.busy()
+                && (header & HEADER_KIND_MASK != EPR_SOURCE_CAPABILITIES_KIND || !state.epr_pending)
+            {
+                state.protocol_error();
+                return Ok(length);
+            }
+            if was_active && header & HEADER_KIND_MASK == DataMessageType::SourceCapabilities as u16
+            {
+                state.require_hard_reset();
+                return Ok(length);
+            }
         }
         if self.shared.borrow().sink_alert_pending {
             // PE_SNK_Wait_for_Get_Status: exactly Get_Status at PD3, or a

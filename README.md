@@ -24,7 +24,10 @@ packet inspector:
   source info and status, and, for a battery-powered source, its battery's
   capacity and charge.
 - **EPR offer on request:** asks an EPR-capable source for its EPR offer and
-  collects the answer, for display only.
+  collects the answer without changing the contract.
+- **Opt-in EPR sink sessions:** caller-bounded fixed and AVS requests, explicit
+  confirmation, entry failure reporting, keep-alive and exit through an SPR
+  contract. Cable qualification and electrical protection remain caller duties.
 - **Session safety guards:** independent validation of incoming framing and
   of outgoing requests against the Source Capabilities. Handles SOP
   `Soft_Reset` recovery and the mandatory `Hard_Reset` boundaries without
@@ -66,8 +69,8 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
   device-side pulse widths, so the crate picks one inside the charger's
   filter limits.
 - **Sink only:** no source role, and no power role, data role or VCONN swap.
-- **No EPR mode:** the EPR offer can be read, but EPR mode is never entered and
-  no EPR object is requested.
+- **EPR is disabled by default:** callers must enable it, supply truthful
+  limits and implement native message authorization and safe reset handling.
 - **No PHY included:** the caller implements `usbpd-traits` for its PD
   controller and supplies clocks, limits and policy.
 
