@@ -114,10 +114,14 @@ impl EprWire {
     pub fn ready(&self) -> bool {
         self.phase == Phase::Active && !self.busy()
     }
-    pub fn deferred_enter(&mut self) {
-        if self.phase == Phase::Ack {
-            self.phase = Phase::Spr;
-        }
+    /// Our Enter, KeepAlive or Exit was Discarded unsent (section 6.11): return
+    /// to the phase it left, so the retry is authorized again.
+    pub fn transmit_deferred(&mut self) {
+        self.phase = match self.phase {
+            Phase::Ack => Phase::Spr,
+            Phase::KeepAlive | Phase::Exit => Phase::Active,
+            phase => phase,
+        };
     }
     pub fn objects(&self) -> [u32; EPR_OBJECTS] {
         core::array::from_fn(|i| {

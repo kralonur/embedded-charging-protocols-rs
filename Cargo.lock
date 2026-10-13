@@ -198,7 +198,7 @@ dependencies = [
 [[package]]
 name = "usbpd"
 version = "2.0.0"
-source = "git+https://github.com/kralonur/usbpd?rev=7e9cf6888e9d6705d3f6fe3c4033b80045e524bc#7e9cf6888e9d6705d3f6fe3c4033b80045e524bc"
+source = "git+https://github.com/kralonur/usbpd?rev=99bf0229450fa807e225c9b2f6b85f655c2842f4#99bf0229450fa807e225c9b2f6b85f655c2842f4"
 dependencies = [
  "byteorder",
  "embassy-futures",
@@ -212,4 +212,4 @@ dependencies = [
 [[package]]
 name = "usbpd-traits"
 version = "2.0.0"
-source = "git+https://github.com/kralonur/usbpd?rev=7e9cf6888e9d6705d3f6fe3c4033b80045e524bc#7e9cf6888e9d6705d3f6fe3c4033b80045e524bc"
+source = "git+https://github.com/kralonur/usbpd?rev=99bf0229450fa807e225c9b2f6b85f655c2842f4#99bf0229450fa807e225c9b2f6b85f655c2842f4"

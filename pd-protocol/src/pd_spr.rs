@@ -24,7 +24,7 @@ use usbpd::sink::{
     policy_engine::Sink,
 };
 /// Upstream timer interface implemented by the caller.
-pub use usbpd::timers::Timer;
+pub use usbpd::timers::{Timer, TimerType};
 use usbpd_traits::{Driver, DriverRxError, DriverTxError};
 
 /// Caller-supplied port identity (Sink Capabilities Extended, Table 6.61).
@@ -3301,7 +3301,7 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                 Err(DriverTxError::Deferred)
             }
             Err(DriverTxError::Deferred) if is_epr_signal => {
-                self.shared.borrow_mut().epr_wire.deferred_enter();
+                self.shared.borrow_mut().epr_wire.transmit_deferred();
                 Err(DriverTxError::Deferred)
             }
             Err(DriverTxError::Deferred) if ams_start => {
