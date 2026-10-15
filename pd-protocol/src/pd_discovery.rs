@@ -36,6 +36,13 @@ const DISCOVER_MODES: u8 = 3;
 // Command Type Initiator and Command Discover Identity (Table 6.33).
 const IDENTITY_PD3: u32 = 0xff00_a801;
 const IDENTITY_PD2: u32 = 0xff00_8001;
+// The same PD3 request at SVDM 2.0, for plugs that NAK a 2.1 request
+// instead of answering at their own version (Table 6.33).
+const IDENTITY_PD3_SVDM_2_0: u32 = 0xff00_a001;
+// Structured VDM Command Type field, bits 7..6, and its NAK value (Table 6.33).
+const VDM_COMMAND_TYPE_SHIFT: u32 = 6;
+const VDM_COMMAND_TYPE_MASK: u32 = 3;
+const VDM_NAK: u32 = 2;
 // Not_Supported Control Message type and mask excluding MessageID/revision (Tables 6.2, 6.4).
 const NOT_SUPPORTED: u16 = 16;
 const CONTROL_KIND_MASK: u16 = 0x701f;
@@ -150,6 +157,15 @@ async fn synchronize<T: Transport>(t: &mut T) -> Result<Result<u8, Sync>, T::Err
     Ok(Ok(
         pd_rx::revision(frame.header()).map_err(|_| T::fault(Fault::Peer))?
     ))
+}
+
+/// A Vendor_Defined reply whose Structured VDM Header is a NAK.
+fn is_nak(frame: Frame<'_>) -> bool {
+    frame.header() & MESSAGE_TYPE_MASK == VENDOR_DEFINED
+        && frame.data().first_chunk::<4>().is_some_and(|header| {
+            (u32::from_le_bytes(*header) >> VDM_COMMAND_TYPE_SHIFT) & VDM_COMMAND_TYPE_MASK
+                == VDM_NAK
+        })
 }
 
 async fn identity_response<T: Transport>(t: &mut T) -> Result<Option<T::Packet>, T::Error> {
@@ -474,13 +490,22 @@ pub async fn inspect<T: Transport>(
     };
     // Discover Identity at the Accept's revision with the first MessageID after
     // the reset; a PD3 plug that does not answer gets one PD2 request (§6.1.3.2 notes).
+    // A PD3 plug that NAKs SVDM 2.1 is asked once more at SVDM 2.0; if that
+    // goes unanswered, its NAK stands.
     let mut id = 1u8;
-    let mut packet = None;
+    let mut packet: Option<T::Packet> = None;
     for (revision, vdm) in [
         (pd_cable::PD3_REVISION, IDENTITY_PD3),
+        (pd_cable::PD3_REVISION, IDENTITY_PD3_SVDM_2_0),
         (pd_cable::PD2_REVISION, IDENTITY_PD2),
     ] {
-        if packet.is_some() || accepted.is_none_or(|accepted| revision > accepted) {
+        let svdm_retry = vdm == IDENTITY_PD3_SVDM_2_0;
+        let skip = if svdm_retry {
+            !packet.as_ref().is_some_and(|packet| is_nak(packet.frame()))
+        } else {
+            packet.is_some()
+        };
+        if skip || accepted.is_none_or(|accepted| revision > accepted) {
             continue;
         }
         let header = VDM_REQUEST_HEADER | (u16::from(revision) << 6) | (u16::from(id) << 9);
@@ -488,11 +513,14 @@ pub async fn inspect<T: Transport>(
         bytes[..2].copy_from_slice(&header.to_le_bytes());
         bytes[2..].copy_from_slice(&vdm.to_le_bytes());
         id += 1;
-        packet = match t.send(&bytes, Sop::Cable).await {
+        let reply = match t.send(&bytes, Sop::Cable).await {
             Ok(()) => identity_response(t).await?,
             Err(error) if T::is_tx_timeout(&error) => None,
             Err(error) => return Err(error),
         };
+        if reply.is_some() || !svdm_retry {
+            packet = reply;
+        }
     }
     t.discovery().next_id = id;
     if let Some(packet) = packet {

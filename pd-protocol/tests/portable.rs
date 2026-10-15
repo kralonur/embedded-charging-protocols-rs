@@ -449,6 +449,28 @@ fn cable_sync_reports_why_and_asks_identity_only_after_accept() {
     assert_eq!((report.status, report.revision), (CableStatus::Identity, 1));
     assert_eq!((link.result.next_id, link.id), (3, 2));
     assert_eq!((report.next_tx_id, report.last_rx_id), (3, Some(2)));
+    // A plug that NAKs SVDM 2.1 is asked once more at SVDM 2.0 and read.
+    let nak = || raw(Sop::Cable, 0x138f, &[0xff00a081]);
+    let (report, link) = run(
+        vec![
+            accept(),
+            nak(),
+            raw(
+                Sop::Cable,
+                0x558f,
+                &[0xff00a041, 0x18001234, 0, 0x56780100, 0x000a4643],
+            ),
+            raw(Sop::Cable, 0x0790, &[]),
+        ],
+        &[],
+    );
+    let report = report.unwrap();
+    assert_eq!((report.status, report.revision), (CableStatus::Identity, 2));
+    assert_eq!(link.tx[2].1, [0x8f, 0x14, 0x01, 0xa0, 0x00, 0xff]);
+    // An unanswered SVDM 2.0 retry keeps the NAK and asks nothing at PD2.
+    let (report, link) = run(vec![accept(), nak(), None], &[]);
+    assert_eq!(report.unwrap().status, CableStatus::Nak);
+    assert_eq!(link.tx.len(), 3);
     // Anything but a Cable Plug's MessageID-0 Accept on SOP' halts.
     for bad in [
         raw(Sop::Cable, 0x0383, &[]),
