@@ -490,8 +490,8 @@ pub async fn inspect<T: Transport>(
     };
     // Discover Identity at the Accept's revision with the first MessageID after
     // the reset; a PD3 plug that does not answer gets one PD2 request (§6.1.3.2 notes).
-    // A PD3 plug that NAKs SVDM 2.1 is asked once more at SVDM 2.0; if that
-    // goes unanswered, its NAK stands.
+    // A plug that NAKs SVDM 2.1 is asked once more at SVDM 2.0, then once with
+    // the PD2 request; when a later request goes unanswered, the NAK stands.
     let mut id = 1u8;
     let mut packet: Option<T::Packet> = None;
     for (revision, vdm) in [
@@ -499,11 +499,11 @@ pub async fn inspect<T: Transport>(
         (pd_cable::PD3_REVISION, IDENTITY_PD3_SVDM_2_0),
         (pd_cable::PD2_REVISION, IDENTITY_PD2),
     ] {
-        let svdm_retry = vdm == IDENTITY_PD3_SVDM_2_0;
-        let skip = if svdm_retry {
-            !packet.as_ref().is_some_and(|packet| is_nak(packet.frame()))
+        let nak = packet.as_ref().is_some_and(|packet| is_nak(packet.frame()));
+        let skip = if vdm == IDENTITY_PD3_SVDM_2_0 {
+            !nak
         } else {
-            packet.is_some()
+            packet.is_some() && !nak
         };
         if skip || accepted.is_none_or(|accepted| revision > accepted) {
             continue;
@@ -518,7 +518,7 @@ pub async fn inspect<T: Transport>(
             Err(error) if T::is_tx_timeout(&error) => None,
             Err(error) => return Err(error),
         };
-        if reply.is_some() || !svdm_retry {
+        if reply.is_some() || !nak {
             packet = reply;
         }
     }

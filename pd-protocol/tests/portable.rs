@@ -467,10 +467,27 @@ fn cable_sync_reports_why_and_asks_identity_only_after_accept() {
     let report = report.unwrap();
     assert_eq!((report.status, report.revision), (CableStatus::Identity, 2));
     assert_eq!(link.tx[2].1, [0x8f, 0x14, 0x01, 0xa0, 0x00, 0xff]);
-    // An unanswered SVDM 2.0 retry keeps the NAK and asks nothing at PD2.
-    let (report, link) = run(vec![accept(), nak(), None], &[]);
+    // A plug that also NAKs SVDM 2.0 gets the PD2 request, MessageID 3.
+    let (report, link) = run(
+        vec![
+            accept(),
+            nak(),
+            raw(Sop::Cable, 0x158f, &[0xff00a081]),
+            raw(
+                Sop::Cable,
+                0x574f,
+                &[0xff008041, 0x18001234, 0, 0x56780100, 0x00000642],
+            ),
+        ],
+        &[],
+    );
+    let report = report.unwrap();
+    assert_eq!((report.status, report.revision), (CableStatus::Identity, 1));
+    assert_eq!(link.tx[3].1, [0x4f, 0x16, 0x01, 0x80, 0x00, 0xff]);
+    // Unanswered retries keep the NAK; nothing is asked after the PD2 request.
+    let (report, link) = run(vec![accept(), nak(), None, None], &[]);
     assert_eq!(report.unwrap().status, CableStatus::Nak);
-    assert_eq!(link.tx.len(), 3);
+    assert_eq!(link.tx.len(), 4);
     // Anything but a Cable Plug's MessageID-0 Accept on SOP' halts.
     for bad in [
         raw(Sop::Cable, 0x0383, &[]),
