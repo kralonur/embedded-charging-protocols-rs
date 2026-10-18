@@ -16,8 +16,10 @@
 //!   9.2.12.1.1, PE_Get_Battery_Status 9.2.13.1.1), once per session for the
 //!   first Battery the SCEDB reports.
 //!
-//! All exist only in PD3. Each answer fits one Chunk (MaxExtendedMsgChunkLen
-//! 26 bytes), so no Chunking layer is needed.
+//! Explicit port scans additionally ask Get_Sink_Cap and SOP Discover Identity
+//! without changing power role. This profile uses PD3 for every query. Extended
+//! answers fit one Chunk (26 bytes); ordinary answers fit seven objects (28
+//! bytes), so no Chunking layer is needed.
 use crate::pd_constants::SPR_MAX_W;
 pub use usbpd::sink::device_policy_manager::PartnerQuery;
 
@@ -70,6 +72,10 @@ pub enum Answer<T> {
     Value(T),
     /// The Source answered Not_Supported.
     NotSupported,
+    /// Structured VDM discovery was declined.
+    Nak,
+    /// Structured VDM discovery returned BUSY; not retried automatically.
+    Busy,
     /// No answer within SenderResponseTimer (a normal outcome, no reset).
     Timeout,
     /// Never sent: SinkTxOK did not allow it, or a Source Message came first
@@ -77,7 +83,8 @@ pub enum Answer<T> {
     Deferred,
     /// A Soft Reset ended the request before its answer; it is not repeated.
     Interrupted,
-    /// Not asked: the negotiated revision is PD2, where the request does not exist.
+    /// Not asked: unavailable at this revision, or the partner did not advertise
+    /// the role needed by this query.
     NotSent,
 }
 impl<T> Answer<T> {
@@ -450,6 +457,36 @@ impl Status {
     }
 }
 
+/// Outcomes of one explicitly requested SOP partner scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortInfo {
+    pub sink: Answer<crate::pd_port::Objects>,
+    pub identity: Answer<crate::pd_port::Identity>,
+}
+impl PortInfo {
+    pub(crate) const PENDING: Self = Self {
+        sink: Answer::Pending,
+        identity: Answer::Pending,
+    };
+    pub(crate) fn next_query(&self) -> Option<PartnerQuery> {
+        if self.sink.is_pending() {
+            Some(PartnerQuery::SinkCapabilities)
+        } else if self.identity.is_pending() {
+            Some(PartnerQuery::DiscoverIdentity)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn interrupt(&mut self) {
+        if self.sink.is_pending() {
+            self.sink = Answer::Interrupted;
+        }
+        if self.identity.is_pending() {
+            self.identity = Answer::Interrupted;
+        }
+    }
+}
+
 /// Everything learned from the information requests in one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartnerInfo {
@@ -463,6 +500,8 @@ pub struct PartnerInfo {
     /// Asked only when the SCEDB reports a Battery ([`SourceExtended::first_battery`]).
     pub battery_capabilities: Answer<BatteryCapabilities>,
     pub battery_status: Answer<BatteryStatus>,
+    /// Explicitly requested port scan, never started automatically.
+    pub port: Option<PortInfo>,
 }
 impl PartnerInfo {
     pub const PENDING: Self = Self {
@@ -474,6 +513,7 @@ impl PartnerInfo {
         status_reads: 0,
         battery_capabilities: Answer::Pending,
         battery_status: Answer::Pending,
+        port: None,
     };
     /// The next Battery request, once each, for the first Battery the SCEDB reports.
     pub fn battery_query(&self) -> Option<PartnerQuery> {
@@ -495,6 +535,8 @@ impl PartnerInfo {
             match outcome {
                 Answer::Value(()) | Answer::Pending => Answer::Pending,
                 Answer::NotSupported => Answer::NotSupported,
+                Answer::Nak => Answer::Nak,
+                Answer::Busy => Answer::Busy,
                 Answer::Timeout => Answer::Timeout,
                 Answer::Deferred => Answer::Deferred,
                 Answer::Interrupted => Answer::Interrupted,
@@ -502,6 +544,16 @@ impl PartnerInfo {
             }
         }
         match query {
+            PartnerQuery::SinkCapabilities => {
+                if let Some(port) = &mut self.port {
+                    port.sink = map(outcome);
+                }
+            }
+            PartnerQuery::DiscoverIdentity => {
+                if let Some(port) = &mut self.port {
+                    port.identity = map(outcome);
+                }
+            }
             PartnerQuery::SourceCapabilitiesExtended => self.source_extended = map(outcome),
             PartnerQuery::Revision => self.revision = map(outcome),
             PartnerQuery::ManufacturerInfo => self.manufacturer = map(outcome),
@@ -514,6 +566,16 @@ impl PartnerInfo {
     /// Record the answer block for `query`. `false` if it does not decode.
     pub fn answer(&mut self, query: PartnerQuery, block: &[u8]) -> bool {
         match query {
+            PartnerQuery::SinkCapabilities => self.port.as_mut().is_some_and(|port| {
+                crate::pd_port::Objects::decode(block)
+                    .map(|objects| port.sink = Answer::Value(objects))
+                    .is_some()
+            }),
+            PartnerQuery::DiscoverIdentity => self.port.as_mut().is_some_and(|port| {
+                crate::pd_port::Identity::decode(block)
+                    .map(|identity| port.identity = Answer::Value(identity))
+                    .is_some()
+            }),
             PartnerQuery::SourceCapabilitiesExtended => SourceExtended::decode(block)
                 .map(|value| self.source_extended = Answer::Value(value))
                 .is_some(),
@@ -555,6 +617,25 @@ pub const GET_SOURCE_CAP_EXTENDED_HEADER: u16 = 0x0091;
 pub const GET_REVISION_HEADER: u16 = 0x0098;
 pub const GET_SOURCE_INFO_HEADER: u16 = 0x0097;
 pub const GET_STATUS_HEADER: u16 = 0x0092;
+/// PD3 Sink/UFP Get_Sink_Cap and one-object SOP Discover Identity (Tables 6.5, 6.33).
+pub const GET_SINK_CAP_HEADER: u16 = 0x0088;
+pub const DISCOVER_IDENTITY_HEADER: u16 = 0x108f;
+
+pub const fn is_port_query(query: PartnerQuery) -> bool {
+    matches!(
+        query,
+        PartnerQuery::SinkCapabilities | PartnerQuery::DiscoverIdentity
+    )
+}
+
+/// The response window from the request's GoodCRC, in milliseconds (Table 7.9).
+pub const fn query_response_ms(query: PartnerQuery) -> u64 {
+    if matches!(query, PartnerQuery::DiscoverIdentity) {
+        usbpd_traits::VDM_RESPONSE_MS
+    } else {
+        usbpd_traits::SENDER_RESPONSE_MS
+    }
+}
 /// Get_Manufacturer_Info: Extended, one Data Object, PD3, Sink/UFP, type
 /// 00110b; then Chunked Chunk 0 of 2 bytes, Target 0 (Port), Ref 0 (Table 6.56).
 pub const GET_MANUFACTURER_INFO_HEADER: u16 = 0x9086;
@@ -574,6 +655,15 @@ pub fn query_request(bytes: &[u8]) -> Option<PartnerQuery> {
         (GET_REVISION_HEADER, []) => Some(PartnerQuery::Revision),
         (GET_SOURCE_INFO_HEADER, []) => Some(PartnerQuery::SourceInfo),
         (GET_STATUS_HEADER, []) => Some(PartnerQuery::Status),
+        (GET_SINK_CAP_HEADER, []) => Some(PartnerQuery::SinkCapabilities),
+        (DISCOVER_IDENTITY_HEADER, [a, b, c, d])
+            if matches!(
+                u32::from_le_bytes([*a, *b, *c, *d]),
+                crate::pd_port::DISCOVER_IDENTITY | 0xff00_a001 | 0xff00_8001
+            ) =>
+        {
+            Some(PartnerQuery::DiscoverIdentity)
+        }
         (GET_MANUFACTURER_INFO_HEADER, body) if body == GET_MANUFACTURER_INFO_BODY => {
             Some(PartnerQuery::ManufacturerInfo)
         }
@@ -598,6 +688,9 @@ pub enum Reply {
     Answer,
     /// PD3 Not_Supported.
     NotSupported,
+    /// Matching Structured VDM NAK or BUSY, with no additional objects.
+    Nak,
+    Busy,
     /// The answer's Message type, but not a valid PD3 answer: fail closed.
     Malformed,
     /// Any other Message (for a well-formed one: a Protocol Error, 9.2.5.2.1).
@@ -629,6 +722,8 @@ pub fn query_answer(query: PartnerQuery, frame: &[u8]) -> Reply {
         };
     }
     let (extended, kind, sizes) = match query {
+        PartnerQuery::SinkCapabilities => (false, 4, 1..=7),
+        PartnerQuery::DiscoverIdentity => (false, 15, 1..=7),
         PartnerQuery::SourceCapabilitiesExtended => (true, 1, 24..=26),
         PartnerQuery::ManufacturerInfo => (true, 7, 4..=26),
         PartnerQuery::Status => (true, 2, 5..=26),
@@ -655,16 +750,77 @@ pub fn query_answer(query: PartnerQuery, frame: &[u8]) -> Reply {
         } else {
             sizes.contains(&(objects as u16))
         };
-    if valid {
-        Reply::Answer
-    } else {
-        Reply::Malformed
+    if !valid {
+        return Reply::Malformed;
     }
+    if query == PartnerQuery::DiscoverIdentity {
+        use crate::pd_port::{IdentityReply, Objects, identity_reply};
+        return match Objects::decode(&frame[2..])
+            .and_then(|objects| identity_reply(objects.as_slice()))
+        {
+            Some(IdentityReply::Ack) => Reply::Answer,
+            Some(IdentityReply::Nak) => Reply::Nak,
+            Some(IdentityReply::Busy) => Reply::Busy,
+            None => Reply::Malformed,
+        };
+    }
+    Reply::Answer
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_wire_gates_require_exact_requests_and_bounded_matching_replies() {
+        use PartnerQuery::{DiscoverIdentity, SinkCapabilities};
+        assert_eq!(query_request(&[0x88, 0x02]), Some(SinkCapabilities));
+        for version in [0x2800u32, 0x2000, 0] {
+            let mut request = std::vec![0x8f, 0x14];
+            request.extend_from_slice(&(0xff00_8001 | version).to_le_bytes());
+            assert_eq!(query_request(&request), Some(DiscoverIdentity));
+            request[1] |= 1; // Source role cannot initiate through this sink gate.
+            assert_eq!(query_request(&request), None);
+        }
+        let frame = |header: u16, objects: &[u32]| {
+            let mut frame = header.to_le_bytes().to_vec();
+            frame.extend(objects.iter().flat_map(|raw| raw.to_le_bytes()));
+            frame
+        };
+        let objects = [0xff00_a041u32, 0xd040_04e8, 0, 0x6860_0000];
+        assert_eq!(
+            query_answer(DiscoverIdentity, &frame(0x49af, &objects)),
+            Reply::Answer
+        );
+        for vdm in [0x1234_a041u32, 0xff00_a042, 0xff00_a001, 0xff00_a141] {
+            let mut wrong = objects;
+            wrong[0] = vdm;
+            assert_eq!(
+                query_answer(DiscoverIdentity, &frame(0x49af, &wrong)),
+                Reply::Malformed
+            );
+        }
+        assert_eq!(
+            query_answer(DiscoverIdentity, &frame(0x19af, &[0xff00_a081])),
+            Reply::Nak
+        );
+        assert_eq!(
+            query_answer(DiscoverIdentity, &frame(0x19af, &[0xff00_a0c1])),
+            Reply::Busy
+        );
+        assert_eq!(
+            query_answer(DiscoverIdentity, &frame(0x49af, &[0xff00_a0c1, 0, 0, 0])),
+            Reply::Malformed
+        );
+        assert_eq!(
+            query_answer(SinkCapabilities, &frame(0x79a4, &[0x3601_912c; 7])),
+            Reply::Answer
+        );
+        assert_eq!(
+            query_answer(SinkCapabilities, &frame(0x79a4, &[0x3601_912c; 6])),
+            Reply::Malformed
+        );
+    }
 
     fn chunk(header: u16, block: &[u8]) -> std::vec::Vec<u8> {
         let mut frame = header.to_le_bytes().to_vec();

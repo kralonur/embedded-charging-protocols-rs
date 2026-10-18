@@ -457,6 +457,48 @@ pub fn describe_pdo(index: usize, raw: u32) -> [u8; 24] {
     row.bytes
 }
 
+/// One received Sink PDO. Sink flags and operational-current fields are not
+/// interpreted as Source capabilities (Tables 6.14–6.19).
+pub fn describe_sink_pdo(index: usize, raw: u32) -> [u8; 24] {
+    use usbpd::protocol_layer::message::data::sink_capabilities::{
+        SinkPowerDataObject, parse_raw_pdo,
+    };
+    let mut row = Row::new();
+    row.decimal(index as u32 + 1).text(b" ");
+    match parse_raw_pdo(raw) {
+        // Fixed/PPS/AVS numeric fields have the same units as the source layouts;
+        // describe_pdo does not interpret their role-specific flags.
+        SinkPowerDataObject::FixedSupply(_)
+        | SinkPowerDataObject::Pps(_)
+        | SinkPowerDataObject::SprAvs(_)
+        | SinkPowerDataObject::EprAvs(_) => return describe_pdo(index, raw),
+        SinkPowerDataObject::VariableSupply(pdo) => {
+            // Table 6.18: 50 mV voltage units, 10 mA operational-current units.
+            row.text(b"VAR ")
+                .fixed(u32::from(pdo.raw_min_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
+                .text(b"-")
+                .fixed(u32::from(pdo.raw_max_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
+                .text(b"V ")
+                .fixed(u32::from(pdo.raw_operational_current()) * 10, 2)
+                .text(b"A");
+        }
+        SinkPowerDataObject::Battery(pdo) => {
+            // Table 6.19: 50 mV voltage units, 250 mW operational-power units.
+            row.text(b"BAT ")
+                .fixed(u32::from(pdo.raw_min_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
+                .text(b"-")
+                .fixed(u32::from(pdo.raw_max_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
+                .text(b"V ")
+                .fixed(u32::from(pdo.raw_operational_power()) * 250, 2)
+                .text(b"W");
+        }
+        SinkPowerDataObject::Unknown(_) => {
+            row.text(b"RAW ").hex(raw, 8);
+        }
+    }
+    row.bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +508,19 @@ mod tests {
             .unwrap()
             .trim_end()
             .into()
+    }
+
+    #[test]
+    fn sink_pdos_use_received_current_and_variable_layout() {
+        assert_eq!(text(describe_sink_pdo(0, 0x3601_912c)), "1 FIX 5.00V 3.00A");
+        assert_eq!(
+            text(describe_sink_pdo(2, 0x8b41_90c8)),
+            "3 VAR 5.0-9.0V 2.00A"
+        );
+        assert_eq!(
+            text(describe_sink_pdo(3, 0xc0dc_212c)),
+            "4 PPS 3.3-11.0V 2.20A"
+        );
     }
 
     const CAPS: [u32; 3] = [0x0801_912c, 0x0002_d12c, 0xc0dc_2164];

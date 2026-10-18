@@ -3113,6 +3113,9 @@ fn scedb_reply(id: u16) -> Vec<u8> {
 fn info_reply(id: u16, block: &[u8]) -> Vec<u8> {
     extended(7, id, 0x8000 | block.len() as u16, block, true)
 }
+#[path = "support/port.rs"]
+mod port;
+
 fn query_kind(bytes: &[u8]) -> Option<pd_protocol::pd_partner::PartnerQuery> {
     pd_protocol::pd_partner::query_request(bytes)
 }

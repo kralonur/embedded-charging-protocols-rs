@@ -3,8 +3,9 @@
 ## Selected revision
 
 - Repository: <https://github.com/kralonur/usbpd>
-- Branch at selection: `feat/sink-protocol-improvements`
-- Full revision: `7e9cf6888e9d6705d3f6fe3c4033b80045e524bc`
+- Branch at selection: `feat/partner-port-scan`
+- Full revision: `1abe32e7761dbc1e1b7a5d8829abda93b5e0ca17`
+- Partner-discovery review baseline: `99bf0229450fa807e225c9b2f6b85f655c2842f4`
 - EPR review baseline: `9c1325e1ecf6be5f5f53be656ae3658dd7131101`
 - Fork baseline examined: `72008c424eeebd0ea271eb5794ff000b3832a134`
 - Packages: `usbpd` and `usbpd-traits`, both version `2.0.0`.
@@ -63,6 +64,29 @@ responsibilities, never permissions inferred from protocol evidence.
 Both packages use the fork directly, rather than crates.io packages with root-scoped
 patches. Downstream path-dependency consumers inherit the exact Git sources and
 need no patches in their own workspace.
+
+## Partner-discovery changes and checks
+
+The selected revision adds PD3 sink-initiated SPR Sink_Capabilities and SOP
+Discover Identity queries. Responses retain all seven possible message objects;
+identity ACK requires the three mandatory VDOs after the VDM header, while NAK
+and BUSY must contain no further VDOs. Unknown sink APDO subtypes remain raw.
+The engine preserves the negotiated SVDM version across later scans and soft
+resets, resetting it on reattach. Identity's VDMResponseTimer subtracts the
+transport's GoodCRC confirmation delay; unsupported queries and timeouts return
+to Ready with the established contract.
+
+The wrapper separately authorizes each explicitly armed query at fixed 5 V;
+Sink_Capabilities is queried only when the partner advertises dual-role power.
+No local source capability is advertised to unlock this path (section 6.3.8
+permits a Port to request its partner's sink capabilities). This adds no source
+operation, role swap or VCONN permission and is not a compliance claim.
+
+The fork passed all 50 sink-policy regressions, strict all-target Clippy and a
+`serde,defmt` feature check. Portable sessions cover the supplied wire shapes,
+explicit arming, unsupported roles/revisions/voltages, reset cancellation and
+preservation of automatic information-query ordering. Hardware interoperability
+and response timing under load remain unverified.
 
 ## EPR changes and checks
 

@@ -24,6 +24,9 @@ packet inspector:
 - **Source information:** extended capabilities, revision, manufacturer,
   source info and status, and, for a battery-powered source, its battery's
   capacity and charge.
+- **Explicit partner port scan:** reads a DRP source's sink PDOs and PD3 SOP
+  identity while remaining a sink at fixed 5 V; retains bounded raw objects
+  and terminal outcomes without role swaps or cable/VCONN changes.
 - **EPR offer on request:** asks an EPR-capable source for its EPR offer and
   collects the answer without changing the contract.
 - **Opt-in EPR sink sessions:** caller-bounded fixed and AVS requests, explicit

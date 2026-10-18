@@ -1117,6 +1117,8 @@ pub struct Selection<L: Limits> {
     sink_alert_armed: Cell<Option<u32>>,
     sink_alert_deferred: Cell<bool>,
     partner: Cell<PartnerInfo>,
+    port_requested: Cell<bool>,
+    dual_role_power: Cell<bool>,
     // The Source's first PDO set EPR Mode Capable (Table 6.9), and its EPR offer.
     epr_capable: Cell<bool>,
     epr_offer: Cell<EprOffer>,
@@ -1166,6 +1168,8 @@ impl<L: Limits> Selection<L> {
             sink_alert_armed: Cell::new(None),
             sink_alert_deferred: Cell::new(false),
             partner: Cell::new(PartnerInfo::PENDING),
+            port_requested: Cell::new(false),
+            dual_role_power: Cell::new(false),
             epr_capable: Cell::new(false),
             epr_offer: Cell::new(EprOffer::NotAsked),
             epr_deferrals: Cell::new(0),
@@ -1193,6 +1197,7 @@ impl<L: Limits> Selection<L> {
         self.cable_active.set(false);
         self.pps_status_at_ms.set(None);
         self.query_at_ms.set(None);
+        self.cancel_port_scan();
         self.sink_alert_events.set(0);
         self.sink_alert_armed.set(None);
         self.sink_alert_deferred.set(false);
@@ -1205,6 +1210,7 @@ impl<L: Limits> Selection<L> {
         self.cable_result.set(None);
         self.pps_status.set(None);
         self.partner.set(PartnerInfo::PENDING);
+        self.dual_role_power.set(false);
         self.epr_capable.set(false);
         self.epr_offer.set(EprOffer::NotAsked);
         self.epr_state.set(EprState::Spr);
@@ -1350,10 +1356,11 @@ impl<L: Limits> Selection<L> {
                 .get()
                 .is_some_and(|at| self.now_ms.get() >= at)
     }
-    /// The request asked next: the once-per-session list, then Get_Status
+    /// Explicit port scan first, then the once-per-session list, then Get_Status
     /// whenever an Alert asked for it.
     pub fn next_query(&self) -> Option<PartnerQuery> {
-        self.listed_query()
+        self.port_query()
+            .or_else(|| self.listed_query())
             .or(self.status_requested.get().then_some(PartnerQuery::Status))
     }
     /// The once-per-session request asked next: [`QUERIES`] in order, then the
@@ -1366,7 +1373,60 @@ impl<L: Limits> Selection<L> {
     }
     /// The current request is one of the once-per-session list (not an Alert's Get_Status).
     fn in_list(&self) -> bool {
-        self.listed_query().is_some()
+        self.port_query().is_some() || self.listed_query().is_some()
+    }
+    /// Start a bounded SOP scan without changing the established fixed 5 V contract.
+    /// A non-DRP source is asked only for identity, never for sink capabilities.
+    pub fn request_port_scan(&self) -> bool {
+        if self.port_requested.get() || !self.port_scan_ready() {
+            return false;
+        }
+        let mut port = pd_partner::PortInfo::PENDING;
+        if !self.dual_role_power.get() {
+            port.sink = Answer::NotSent;
+        }
+        let mut partner = self.partner.get();
+        partner.port = Some(port);
+        self.partner.set(partner);
+        self.port_requested.set(true);
+        self.query_deferrals.set(0);
+        self.query_at_ms.set(Some(
+            self.now_ms
+                .get()
+                .saturating_add(L::SESSION_POLICY.query_settle_ms),
+        ));
+        if let Some(waker) = self.waker.borrow().as_ref() {
+            waker.wake_by_ref();
+        }
+        true
+    }
+    /// Shared precondition, rechecked by the armed wire gate before each request.
+    fn port_scan_ready(&self) -> bool {
+        self.peer_revision.get() == 2
+            && self.epr_state.get() == EprState::Spr
+            && !self.request_in_flight.get()
+            && !self.has_pending()
+            && !self.cable_active.get()
+            && self.established.get().is_some_and(|target| {
+                target.supply == Supply::Fixed && u32::from(target.mv) == VSAFE5V_MV
+            })
+    }
+    pub fn port_query_armed(&self, query: PartnerQuery) -> bool {
+        self.port_query() == Some(query)
+            && (query != PartnerQuery::SinkCapabilities || self.dual_role_power.get())
+    }
+    fn port_query(&self) -> Option<PartnerQuery> {
+        (self.port_requested.get() && self.port_scan_ready())
+            .then(|| self.partner.get().port?.next_query())
+            .flatten()
+    }
+    fn cancel_port_scan(&self) {
+        self.port_requested.set(false);
+        let mut partner = self.partner.get();
+        if let Some(port) = &mut partner.port {
+            port.interrupt();
+        }
+        self.partner.set(partner);
     }
     /// What the Source answered so far in this session.
     pub fn partner_info(&self) -> PartnerInfo {
@@ -1436,11 +1496,20 @@ impl<L: Limits> Selection<L> {
         let mut partner = self.partner.get();
         partner.set(query, outcome);
         self.partner.set(partner);
-        self.advance_query();
+        self.advance_query(query);
     }
-    // Battery requests advance by their recorded outcome, not by the index.
-    fn advance_query(&self) {
-        if (self.query_index.get() as usize) < QUERIES.len() {
+    // Explicit port requests and Battery requests advance by their recorded outcomes.
+    fn advance_query(&self, query: PartnerQuery) {
+        if pd_partner::is_port_query(query) {
+            if self
+                .partner
+                .get()
+                .port
+                .is_none_or(|port| port.next_query().is_none())
+            {
+                self.port_requested.set(false);
+            }
+        } else if (self.query_index.get() as usize) < QUERIES.len() {
             self.query_index.set(self.query_index.get() + 1);
         }
         self.query_deferrals.set(0);
@@ -1505,6 +1574,7 @@ impl<L: Limits> Selection<L> {
             || self.request_in_flight.get()
             || self.waiting()
             || self.cable_active.get()
+            || self.port_requested.get()
         {
             return false;
         }
@@ -1646,6 +1716,13 @@ impl<L: Limits> Selection<L> {
                 }
             }
         }
+        // Dual-Role Power, bit 29 of the first fixed Source PDO (Table 6.9).
+        self.dual_role_power.set(
+            capabilities
+                .pdos()
+                .first()
+                .is_some_and(|pdo| pdo.to_raw() & (1 << 29) != 0),
+        );
         self.epr_capable.set(capabilities.epr_mode_capable());
         self.options.set(options);
         self.range_max_mv.set(range_max_mv);
@@ -1740,6 +1817,7 @@ impl<L: Limits> Selection<L> {
             || self.cable_active()
             || self.rejected.get()
             || self.waiting()
+            || self.port_requested.get()
             || self.candidate.get() == self.target.get()
         {
             return false;
@@ -1969,6 +2047,7 @@ impl<L: Limits> State<'_, L> {
             if interrupted_epr {
                 selection.epr_offer.set(EprOffer::NoAnswer);
             }
+            selection.cancel_port_scan();
             selection.pending.set(None);
             selection.cable_pending.set(false);
             selection.cable_mode.set(None);
@@ -2512,7 +2591,8 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
             let mut trace = trace.borrow_mut();
             match outcome {
                 QueryOutcome::Answer(_) => trace.queries_answered += 1,
-                QueryOutcome::NotSupported => trace.queries_not_supported += 1,
+                QueryOutcome::NotSupported | QueryOutcome::Nak => trace.queries_not_supported += 1,
+                QueryOutcome::Busy => {}
                 QueryOutcome::Timeout => trace.queries_timeouts += 1,
                 QueryOutcome::Deferred => trace.queries_deferred += 1,
                 QueryOutcome::NotSent => {}
@@ -2530,7 +2610,7 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
                     return;
                 }
                 selection.partner.set(partner);
-                selection.advance_query();
+                selection.advance_query(query);
             }
             QueryOutcome::Deferred
                 if selection.query_deferrals.get() + 1 < L::SESSION_POLICY.query_max_deferrals =>
@@ -2546,6 +2626,8 @@ impl<L: Limits> DevicePolicyManager for Policy<'_, '_, L> {
             }
             QueryOutcome::Deferred => selection.finish_query(query, Answer::Deferred),
             QueryOutcome::NotSupported => selection.finish_query(query, Answer::NotSupported),
+            QueryOutcome::Nak => selection.finish_query(query, Answer::Nak),
+            QueryOutcome::Busy => selection.finish_query(query, Answer::Busy),
             QueryOutcome::Timeout => selection.finish_query(query, Answer::Timeout),
             QueryOutcome::NotSent => {}
         }
@@ -3130,6 +3212,8 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                     && !state.caps_reply
                     && state.partner_revision == 2
                     && state.established.is_some()
+                    && (!pd_partner::is_port_query(query)
+                        || state.selection.is_some_and(|s| s.port_query_armed(query)))
             });
         // EPR_Get_Source_Cap only as armed by policy, once, from an idle PD3
         // contract (`Limits::EPR_OFFER`): exactly its bytes.
@@ -3636,7 +3720,10 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
             let serviced = {
                 let mut state = self.shared.borrow_mut();
                 let serviced = match pd_partner::query_answer(query, &buffer[..length]) {
-                    pd_partner::Reply::Answer | pd_partner::Reply::NotSupported => true,
+                    pd_partner::Reply::Answer
+                    | pd_partner::Reply::NotSupported
+                    | pd_partner::Reply::Nak
+                    | pd_partner::Reply::Busy => true,
                     pd_partner::Reply::Other if framed && same_revision => state.protocol_error(),
                     _ => {
                         state.fail(Error::Peer);

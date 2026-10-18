@@ -15,6 +15,7 @@ pub mod pd_cable_modes;
 mod pd_constants;
 pub mod pd_discovery;
 pub mod pd_partner;
+pub mod pd_port;
 pub mod pd_rx;
 pub mod pd_sniff;
 pub mod pd_spr;
