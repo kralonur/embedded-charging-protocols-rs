@@ -114,6 +114,8 @@ control:
 - [SOP soft reset contract](docs/PD-SOFT-RESET.md).
 - [Hard reset boundary](docs/PD-HARD-RESET.md).
 - [USB PD pin review](docs/usbpd-review.md): the reviewed `usbpd` revision.
+- [SCP and FCP caller contract](docs/scp.md): entry, transport timing, output
+  sessions and passive decoding.
 
 ## Build and validation
 
