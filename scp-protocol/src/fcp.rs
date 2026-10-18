@@ -7,7 +7,7 @@ use crate::control::{ControlError, RequestError};
 use crate::{Error, Transport, wire};
 
 /// `FCP_PROTOCOL_DISCRETE_CAPABILOTIES0`: the index of the highest output
-/// voltage register; the driver accepts 1 (5 V, 9 V) or 2 (5 V, 9 V, 12 V).
+/// voltage register; the driver rejects values above 2 (5 V, 9 V, 12 V).
 const CAPABILITIES: u8 = 0x21;
 const MAX_CAPABILITY: u8 = 2;
 /// `FCP_PROTOCOL_MAX_PWR`, in 500 mW steps.
@@ -25,6 +25,8 @@ const ENABLE: u8 = 1;
 /// steps; output voltage `n` is at `OUTPUT_V0 + n`.
 pub(super) const VOLTAGE: u8 = 0x2c;
 pub(super) const STEP_MV: u16 = 100;
+/// The highest voltage those one-byte registers hold, in mV.
+const MAX_LEVEL_MV: u16 = u8::MAX as u16 * STEP_MV;
 const OUTPUT_V0: u8 = 0x30;
 /// Output voltages one adapter can offer: indices 0 to [`MAX_CAPABILITY`].
 const MAX_LEVELS: usize = MAX_CAPABILITY as usize + 1;
@@ -38,13 +40,17 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    /// An adapter known to list `levels` in mV: one to three, nonzero and
-    /// rising, as detection accepts them.
+    /// An adapter known to list `levels` in mV: one to three, nonzero,
+    /// rising and in whole register steps, as detection accepts them, so
+    /// every level is written exactly.
     pub fn new(levels: &[u16], max_power_mw: Option<u32>) -> Option<Self> {
         if levels.is_empty()
             || levels.len() > MAX_LEVELS
             || levels[0] == 0
             || levels.windows(2).any(|pair| pair[1] <= pair[0])
+            || levels
+                .iter()
+                .any(|mv| !mv.is_multiple_of(STEP_MV) || *mv > MAX_LEVEL_MV)
         {
             return None;
         }

@@ -505,6 +505,10 @@ fn fcp_detects_listed_voltages_and_applies_only_checked_writes() {
     assert_eq!(adapter.levels(), [5_200, 9_000, 12_000]);
     assert_eq!(adapter.max_power_mw, Some(18_000));
     assert_eq!(Output::new(adapter, 10_000), Err(RequestError::Range));
+    // A level the one-byte register cannot hold would be written as another.
+    for levels in [[5_000, 9_050], [5_000, 25_600]] {
+        assert_eq!(scp_protocol::fcp::Adapter::new(&levels, None), None);
+    }
     // A fault latched before the session is read to clear it, not judged.
     source.registers.as_mut().unwrap()[0x28] = 0x08;
     let start = source.commands.len();
