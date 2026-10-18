@@ -6,6 +6,7 @@
 
 use crate::UI_US;
 use crate::control::{SHORT_OFFSET_MV, SHORT_STEP_MV, SHORT_VOLTAGE, VOLTAGE};
+use crate::fcp::{STEP_MV as FCP_STEP_MV, VOLTAGE as FCP_VOLTAGE};
 use crate::wire::{
     ACK, ACK_MASK, CRC, MULTI_WRITE, NACK, PING_MAX_US, PING_MIN_US, PING_UI, READ, WRITE,
     parity_bit,
@@ -14,11 +15,6 @@ use crate::wire::{
 /// Multiple-byte register read command (`SC8545_SCP_CMD_MBRRD` in
 /// `sc8545_protocol.h`, see the crate docs). Its reply carries the data.
 const MULTI_READ: u8 = 0x1c;
-/// FCP output voltage register and its step in mV: `FCP_PROTOCOL_VOUT_CONFIG`
-/// and `FCP_PROTOCOL_VOUT_STEP` in Huawei's `adapter_protocol_fcp.h` (crate
-/// docs' kernel commit).
-const FCP_VOLTAGE: u8 = 0x2c;
-const FCP_STEP_MV: u16 = 100;
 /// Register blocks: `adapter_protocol_fcp.h` defines FCP registers below
 /// 0x70 and identification/version registers from 0x70 to 0x8b, which both
 /// drivers read; SCP ratings and controls start at 0x90 (Tables B.19–B.27).

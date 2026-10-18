@@ -8,8 +8,8 @@ hardware registers, GPIOs, ADC measurements or storage: the physical transport
 the caller.
 
 > **Note:** USB Power Delivery (`pd-protocol`) and Quick Charge 2.0 and 3.0
-> (`qc-protocol`) are implemented, with SCP adapter identification and
-> output control (`scp-protocol`). Review the implementation and validate
+> (`qc-protocol`) are implemented, with SCP and FCP adapter identification
+> and output control (`scp-protocol`). Review the implementation and validate
 > it on your hardware before relying on it.
 
 ## Features
@@ -58,7 +58,8 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
   pair of measured D+/D− voltages asks for, as a charger reads it, for
   watching a device that drives Quick Charge itself.
 
-The `scp-protocol` crate provides SCP identification and output control:
+The `scp-protocol` crate provides SCP and FCP identification and output
+control:
 
 - Read-only detection of whitelisted adapter-type and capability registers.
 - Explicit voltage/current output control (`control`): requests are checked
@@ -66,6 +67,10 @@ The `scp-protocol` crate provides SCP identification and output control:
   acknowledged and read back, never retried; protections stay enabled and a
   finite adapter watchdog drops the output if the caller stops refreshing.
   One transaction per poll, so a caller stays responsive. No authentication.
+- FCP over the same PHY (`fcp`): the adapter's listed output voltages and
+  rated power, and setting one of them, written, read back, then applied.
+  The adapter's latched fault flags are cleared when a session starts, then
+  checked before each change and on every refresh.
 - Checked master/slave ping sequencing, source-clock synchronization,
   quarter-UI framing, odd parity, CRC-8 and ACK/NACK validation.
 - Modern programmable-mode identification and the two-register legacy
@@ -84,7 +89,7 @@ The `scp-protocol` crate provides SCP identification and output control:
 
 ## Limitations
 
-- **SCP is not hardware-validated.** Simulated wire tests establish encoding
+- **SCP and FCP are not hardware-validated.** Simulated wire tests establish encoding
   and failure behavior, not compatibility with a particular adapter or, for
   passive decoding, phone.
   Electrical entry, timing and default-output checks remain caller duties.

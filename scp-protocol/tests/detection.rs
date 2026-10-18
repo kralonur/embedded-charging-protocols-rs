@@ -466,3 +466,64 @@ fn output_control_rejects_bad_requests_and_ambiguous_writes_without_retry() {
         Err(ControlError::Protection)
     );
 }
+
+fn fcp_source() -> Source {
+    let mut source = Source::new([]);
+    let mut registers = [0; 256];
+    registers[0x21] = 2; // Three voltages; the first defaults to 5.2 V (Table B.11).
+    registers[0x22] = 36; // 18 W.
+    registers[0x30..=0x32].copy_from_slice(&[52, 90, 120]);
+    source.registers = Some(registers);
+    source
+}
+
+fn fcp_detect(source: &mut Source) -> Result<scp_protocol::fcp::Adapter, Error<()>> {
+    let mut detection = scp_protocol::fcp::Detection::new();
+    loop {
+        if let Some(adapter) = detection.poll(source)? {
+            return Ok(adapter);
+        }
+    }
+}
+
+// FCP sets a listed voltage, reads it back and only then applies it;
+// anything the adapter does not list is refused before any write.
+#[test]
+fn fcp_detects_listed_voltages_and_applies_only_checked_writes() {
+    use scp_protocol::control::{ControlError, RequestError};
+    use scp_protocol::fcp::{Output, Session};
+    let mut source = fcp_source();
+    let adapter = fcp_detect(&mut source).unwrap();
+    assert_eq!(adapter.levels(), [5_200, 9_000, 12_000]);
+    assert_eq!(adapter.max_power_mw, Some(18_000));
+    assert_eq!(Output::new(adapter, 10_000), Err(RequestError::Range));
+    // A fault latched before the session is read to clear it, not judged.
+    source.registers.as_mut().unwrap()[0x28] = 0x08;
+    let start = source.commands.len();
+    let mut session = Session::start(adapter, Output::new(adapter, 9_000).unwrap()).unwrap();
+    while session.busy() {
+        session.poll(&mut source).unwrap();
+    }
+    assert_eq!(
+        source.commands[start..],
+        [
+            vec![0x0c, 0x28],
+            vec![0x0b, 0x2c, 90],
+            vec![0x0c, 0x2c],
+            vec![0x0b, 0x2b, 1],
+        ]
+    );
+    session.stop();
+    while session.busy() {
+        session.poll(&mut source).unwrap();
+    }
+    assert_eq!(source.registers.as_ref().unwrap()[0x2c], 52);
+    assert_eq!(source.level, None);
+    source.registers.as_mut().unwrap()[0x28] = 0x04; // Overvoltage.
+    session.refresh();
+    assert_eq!(session.poll(&mut source), Err(ControlError::Protection));
+
+    let mut source = fcp_source();
+    source.registers.as_mut().unwrap()[0x21] = 3;
+    assert_eq!(fcp_detect(&mut source), Err(Error::NotFcp));
+}
