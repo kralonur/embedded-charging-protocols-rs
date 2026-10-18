@@ -94,6 +94,84 @@ fn source_only_scan_skips_sink_query_and_preserves_busy_as_a_final_result() {
     });
 }
 
+/// Only the specified VDM response window expires; all other timers pend.
+struct IdentityResponseOnly;
+impl usbpd::timers::Timer for IdentityResponseOnly {
+    async fn after_millis(ms: u64) {
+        if ms == usbpd_traits::VDM_RESPONSE_MS {
+            Ticks::after_millis(ms).await;
+        } else {
+            pending::<()>().await;
+        }
+    }
+}
+
+#[test]
+fn identity_timeout_means_an_acknowledged_request_not_unsupported_or_a_new_contract() {
+    query_session::<IdentityResponseOnly>(2, 0, |selection, state, trace, _, poll| {
+        state.borrow_mut().rx.extend([
+            packet(1, 3, &[fixed(5000, 3000) | (1 << 29)]),
+            packet(3, 4, &[]),
+            packet(6, 5, &[]),
+        ]);
+        assert!(poll().is_pending());
+        let contract = trace.borrow().contract.as_ref().unwrap().request.0;
+        assert!(selection.request_port_scan());
+        at(state, poll, pd_spr::QUERY_SETTLE_MS);
+        state
+            .borrow_mut()
+            .rx
+            .push_back(packet(4, 6, &[0x3601_912c, 0xc0dc_212e]));
+        assert!(poll().is_pending());
+        assert_eq!(
+            query_kind(state.borrow().tx.last().unwrap()),
+            Some(PartnerQuery::DiscoverIdentity)
+        );
+        assert!(poll().is_pending());
+        let port = selection.partner_info().port.unwrap();
+        assert!(
+            matches!(port.sink, Answer::Value(objects) if objects.as_slice() == [0x3601_912c, 0xc0dc_212e])
+        );
+        assert_eq!(port.identity, Answer::Timeout);
+        assert_eq!(trace.borrow().queries_timeouts, 1);
+        assert_eq!(
+            trace.borrow().contract.as_ref().unwrap().request.0,
+            contract
+        );
+        assert_eq!(
+            state
+                .borrow()
+                .tx
+                .iter()
+                .filter(|frame| query_kind(frame) == Some(PartnerQuery::DiscoverIdentity))
+                .count(),
+            1
+        );
+        assert_eq!(
+            query_kind(state.borrow().tx.last().unwrap()),
+            Some(PartnerQuery::SourceCapabilitiesExtended)
+        );
+    });
+}
+
+#[test]
+fn malformed_identity_is_a_receive_error_not_a_silent_timeout() {
+    query_session::<Never>(2, 0, |selection, state, trace, _, poll| {
+        assert!(selection.request_port_scan());
+        at(state, poll, pd_spr::QUERY_SETTLE_MS);
+        state
+            .borrow_mut()
+            .rx
+            .push_back(packet(15, 3, &[0xff00_a042, 0, 0, 0]));
+        assert!(matches!(poll(), Poll::Ready(Err(Error::Peer))));
+        assert_ne!(
+            selection.partner_info().port.unwrap().identity,
+            Answer::Timeout
+        );
+        assert_eq!(trace.borrow().queries_timeouts, 0);
+    });
+}
+
 #[test]
 fn port_scan_refuses_pd2_and_other_voltages_and_reset_interrupts_it() {
     query_session::<Never>(1, 0, |selection, _, _, _, _| {

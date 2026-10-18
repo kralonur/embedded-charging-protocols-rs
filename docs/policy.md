@@ -22,7 +22,12 @@ and cable discovery, retains bounded raw objects and distinct terminal outcomes,
 and is revoked by reset or session cancellation. Physical voltage checks and
 exclusive receive/transmit authorization remain the transport caller's duty.
 Identity uses VDMResponseTimer; other queries use SenderResponseTimer. Optional
-Product Type VDOs remain raw, and absent VDOs are never synthesized.
+Product Type VDOs are decoded only for known SOP UFP v1.3 / DFP v1.2 layouts
+at the received positions defined by the ID Header; unknown layouts stay raw,
+and absent VDOs are never synthesized. Calculated Sink PDO power and flags are
+informational only. A Discover Identity timeout follows successful request
+acknowledgement, not proof that identity is unsupported; no automatic retry or
+role change is used to work around it.
 
 Regression peers provide synthetic policy in `tests/support`. Expected wire
 bytes remain explicit, independent test vectors rather than being generated
