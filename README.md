@@ -8,8 +8,8 @@ hardware registers, GPIOs, ADC measurements or storage: the physical transport
 the caller.
 
 > **Note:** USB Power Delivery (`pd-protocol`) and Quick Charge 2.0 and 3.0
-> (`qc-protocol`) are implemented, with experimental read-only SCP adapter
-> identification (`scp-protocol`). Review the implementation and validate
+> (`qc-protocol`) are implemented, with SCP adapter identification and
+> output control (`scp-protocol`). Review the implementation and validate
 > it on your hardware before relying on it.
 
 ## Features
@@ -58,10 +58,14 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
   pair of measured D+/D− voltages asks for, as a charger reads it, for
   watching a device that drives Quick Charge itself.
 
-The `scp-protocol` crate provides experimental read-only SCP identification:
+The `scp-protocol` crate provides SCP identification and output control:
 
-- Three whitelisted adapter-type registers only; no register-write API,
-  voltage/current requests or authentication.
+- Read-only detection of whitelisted adapter-type and capability registers.
+- Explicit voltage/current output control (`control`): requests are checked
+  against the adapter's ranges, steps and rated power; every write is
+  acknowledged and read back, never retried; protections stay enabled and a
+  finite adapter watchdog drops the output if the caller stops refreshing.
+  One transaction per poll, so a caller stays responsive. No authentication.
 - Checked master/slave ping sequencing, source-clock synchronization,
   quarter-UI framing, odd parity, CRC-8 and ACK/NACK validation.
 - Modern programmable-mode identification and the two-register legacy

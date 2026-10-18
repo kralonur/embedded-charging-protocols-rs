@@ -19,6 +19,9 @@ const ALGORITHM: Algorithm<u8> = Algorithm {
 const CRC: Crc<u8, NoTable> = Crc::<u8, NoTable>::new(&ALGORITHM);
 /// Single-byte register read command (`SBRRD`, Figure B.18).
 const READ: u8 = 0x0c;
+/// Single/multiple-byte register write commands (Figures B.20–B.23).
+const WRITE: u8 = 0x0b;
+const MULTI_WRITE: u8 = 0x1b;
 /// Acknowledgement codes in the low nibble, `0bxxxx_1000` and `0bxxxx_0011`.
 /// Bit 7 is an adapter status flag, so 0x88 and 0x83 are valid too
 /// (B.9.1, Table B.15). The whole byte is part of the CRC.
@@ -61,18 +64,37 @@ const RECOVERY_UI: u32 = 100;
 /// Read one register, retrying damaged or unanswered transactions.
 /// D− is released after every attempt.
 pub(super) fn read<T: Transport>(phy: &mut T, register: Register) -> Result<u8, Error<T::Error>> {
-    let command = [READ, register as u8];
+    read_address(phy, register as u8)
+}
+
+pub(super) fn read_address<T: Transport>(phy: &mut T, register: u8) -> Result<u8, Error<T::Error>> {
     for _ in 1..ATTEMPTS {
-        match attempt(phy, &command) {
+        match attempt(phy, &[READ, register], true) {
             Err(error) if error.is_retryable() => phy.delay_us(RECOVERY_UI * UI_US),
             result => return result,
         }
     }
-    attempt(phy, &command)
+    attempt(phy, &[READ, register], true)
 }
 
-fn attempt<T: Transport>(phy: &mut T, command: &[u8]) -> Result<u8, Error<T::Error>> {
-    let result = transaction(phy, command);
+/// Control writes are never retried: a missing reply may hide an applied
+/// write. The caller must release the session on any ambiguous outcome.
+/// Two-byte values use one packet, avoiding partially updated setpoints.
+pub(super) fn write<T: Transport>(
+    phy: &mut T,
+    register: u8,
+    value: &[u8],
+) -> Result<(), Error<T::Error>> {
+    match value {
+        [byte] => attempt(phy, &[WRITE, register, *byte], false).map(|_| ()),
+        [high, low] => attempt(phy, &[MULTI_WRITE, register, 2, *high, *low], false).map(|_| ()),
+        // All callers are internal and use one- or two-byte control registers.
+        _ => Err(Error::Framing),
+    }
+}
+
+fn attempt<T: Transport>(phy: &mut T, command: &[u8], read: bool) -> Result<u8, Error<T::Error>> {
+    let result = transaction(phy, command, read);
     phy.drive(None).map_err(Error::Transport)?;
     result
 }
@@ -80,13 +102,17 @@ fn attempt<T: Transport>(phy: &mut T, command: &[u8]) -> Result<u8, Error<T::Err
 /// Figures B.18 and B.19: ping exchange, command, ping exchange, reply,
 /// ping exchange. A complete reply is checked only after the closing
 /// exchange, so a parity or CRC failure still leaves the bus idle.
-fn transaction<T: Transport>(phy: &mut T, command: &[u8]) -> Result<u8, Error<T::Error>> {
+fn transaction<T: Transport>(
+    phy: &mut T,
+    command: &[u8],
+    read: bool,
+) -> Result<u8, Error<T::Error>> {
     let ui = exchange_ping(phy)?;
     // The charger drives the bus low for one UI after its ping.
     phy.delay_us(ui);
     send(phy, command)?;
     let ui = exchange_ping(phy)?;
-    let reply = receive(phy, ui)?;
+    let reply = receive(phy, ui, read)?;
     phy.delay_us(ui);
     let ui = exchange_ping(phy)?;
     // Respect the charger's final active-low interval and idle settle.
@@ -134,17 +160,20 @@ impl Reply {
         } else if self.bytes[0] & ACK_MASK == NACK {
             Err(Error::Nack)
         } else {
-            payload.get(1).copied().ok_or(Error::Ack)
+            // Write acknowledgements have no data byte; their caller only
+            // consumes success after parity/CRC and the closing ping pass.
+            Ok(payload.get(1).copied().unwrap_or_default())
         }
     }
 }
 
 /// Receive the reply bytes and the charger ping that ends the transfer.
 /// The acknowledgement byte decides how many bytes follow it.
-fn receive<T: Transport>(phy: &mut T, ui: u32) -> Result<Reply, Error<T::Error>> {
+fn receive<T: Transport>(phy: &mut T, ui: u32, read: bool) -> Result<Reply, Error<T::Error>> {
     let (ack, mut previous) = receive_byte(phy, false, ui)?;
     let len = match ack & ACK_MASK {
-        ACK => ACK_LEN,
+        ACK if read => ACK_LEN,
+        ACK => NACK_LEN,
         NACK => NACK_LEN,
         _ => return Err(Error::Ack),
     };

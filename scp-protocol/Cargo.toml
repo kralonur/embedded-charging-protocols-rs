@@ -2,7 +2,7 @@
 name = "scp-protocol"
 version = "0.1.0"
 edition = "2024"
-description = "Allocation-free, read-only SCP adapter detection with caller-owned physical transport."
+description = "Allocation-free SCP detection and output control with caller-owned physical transport."
 license = "MIT OR Apache-2.0"
 
 [dependencies]

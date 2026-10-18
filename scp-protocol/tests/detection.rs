@@ -12,6 +12,7 @@ enum Reply {
     Nack,
     BadCrc,
     BadParity,
+    WriteAck,
 }
 
 struct Source {
@@ -26,6 +27,11 @@ struct Source {
     read_bits: Vec<bool>,
     contention: bool,
     stretch_sync: bool,
+    registers: Option<[u8; 256]>,
+    commands: Vec<Vec<u8>>,
+    command_start: usize,
+    reject_write: bool,
+    corrupt_readback: bool,
 }
 
 impl Source {
@@ -42,6 +48,11 @@ impl Source {
             read_bits: vec![],
             contention: false,
             stretch_sync: false,
+            registers: None,
+            commands: vec![],
+            command_start: 0,
+            reject_write: false,
+            corrupt_readback: false,
         }
     }
 
@@ -58,10 +69,41 @@ impl Source {
             return;
         }
         at += 3 * UI;
-        let reply = self.replies.pop_front().unwrap_or(Reply::Nack);
+        let reply = if let Some(registers) = &mut self.registers {
+            let packet: Vec<u8> = self.read_bits[self.command_start + 1..]
+                .as_chunks::<9>()
+                .0
+                .iter()
+                .map(|bits| {
+                    bits[..8]
+                        .iter()
+                        .fold(0, |value, bit| (value << 1) | u8::from(*bit))
+                })
+                .collect();
+            self.command_start = self.read_bits.len();
+            let (crc, command) = packet.split_last().unwrap();
+            assert_eq!(*crc, checksum(command));
+            self.commands.push(command.to_vec());
+            match command {
+                [0x0c, address] => Reply::Ack(registers[usize::from(*address)]),
+                [0x0b, address, value] if !self.reject_write => {
+                    registers[usize::from(*address)] = value ^ u8::from(self.corrupt_readback);
+                    Reply::WriteAck
+                }
+                [0x1b, address, 2, high, low] if !self.reject_write => {
+                    registers[usize::from(*address)] = *high;
+                    registers[usize::from(*address) + 1] = low ^ u8::from(self.corrupt_readback);
+                    Reply::WriteAck
+                }
+                _ => Reply::Nack,
+            }
+        } else {
+            self.replies.pop_front().unwrap_or(Reply::Nack)
+        };
         let mut packet = match reply {
             Reply::Ack(data) => vec![0x08, data],
             Reply::Nack => vec![0x03],
+            Reply::WriteAck => vec![0x08],
             Reply::BadCrc | Reply::BadParity => vec![0x08, 0x98],
         };
         let checksum = checksum(&packet);
@@ -299,4 +341,128 @@ fn absent_or_slow_transport_fails_bounded_and_releases() {
     source.stretch_sync = true;
     assert_eq!(detect(&mut source), Err(Error::Timing));
     assert_eq!(source.level, None);
+}
+
+fn controlled_adapter() -> scp_protocol::Adapter {
+    scp_protocol::Adapter {
+        modes: Modes::HighVoltage,
+        type0: Some(0x1c),
+        type1: None,
+        capabilities: Some(Capabilities {
+            min_mv: 5_500,
+            max_mv: 11_000,
+            min_ma: 300,
+            max_ma: 3_200,
+            vstep_mv: Some(20),
+            istep_ma: Some(50),
+            max_power_dw: Some(350),
+        }),
+    }
+}
+
+fn controlled_source() -> Source {
+    let mut source = Source::new([]);
+    let mut registers = [0; 256];
+    registers[0xa0] = 0x80; // Ordinary mode, output enabled.
+    registers[0xa1] = 2; // Default one-second watchdog.
+    source.registers = Some(registers);
+    source
+}
+
+// Output writes must be atomic, acknowledged, read back and ordered so
+// changing setpoints cannot briefly exceed the adapter's power rating.
+/// Run every queued control transaction, stopping at the first error.
+fn run<T: scp_protocol::Transport>(
+    session: &mut scp_protocol::control::Session,
+    phy: &mut T,
+) -> Result<(), scp_protocol::control::ControlError<T::Error>> {
+    while session.busy() {
+        session.poll(phy)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn output_control_checks_writes_preserves_protections_and_stops() {
+    use scp_protocol::control::{Output, RequestError, Session};
+    let adapter = controlled_adapter();
+    let output = Output::new(adapter, 11_000, 3_150).unwrap();
+    let mut source = controlled_source();
+    let mut session = Session::start(adapter, output).unwrap();
+    // Each poll is exactly one transaction, so callers stay responsive.
+    while session.busy() {
+        let before = source.commands.len();
+        session.poll(&mut source).unwrap();
+        assert_eq!(source.commands.len(), before + 1);
+        if session.busy() {
+            // No second procedure may queue behind a running one.
+            assert_eq!(session.set(output), Err(RequestError::Busy));
+        }
+    }
+    assert_eq!(session.output(), output);
+    let registers = source.registers.as_ref().unwrap();
+    assert_eq!(registers[0xa0], 0xc1); // Mode + output + temperature; D+ protection stays on.
+    assert_eq!(registers[0xa1], 4); // Finite two-second watchdog.
+    assert_eq!(&registers[0xb8..=0xbb], &[0x2a, 0xf8, 0x0c, 0x4e]);
+    let start = source.commands.len();
+    session.set(session.request(6_000, 3_200).unwrap()).unwrap();
+    run(&mut session, &mut source).unwrap();
+    let writes: Vec<_> = source.commands[start..]
+        .iter()
+        .filter(|command| command[0] != 0x0c)
+        .collect();
+    assert_eq!(writes[0], &[0x1b, 0xba, 2, 0x0c, 0x4e]); // Keep 3.15 A before voltage falls.
+    assert_eq!(writes[writes.len() - 2], &[0x1b, 0xb8, 2, 0x17, 0x70]);
+    assert_eq!(writes[writes.len() - 1], &[0x1b, 0xba, 2, 0x0c, 0x80]); // Only then raise to 3.2 A.
+    session.refresh();
+    run(&mut session, &mut source).unwrap();
+    session.stop();
+    run(&mut session, &mut source).unwrap();
+    assert_eq!(source.registers.as_ref().unwrap()[0xa0], 0x81);
+    assert_eq!(source.level, None);
+    assert!(!source.contention);
+}
+
+#[test]
+fn output_control_rejects_bad_requests_and_ambiguous_writes_without_retry() {
+    use scp_protocol::control::{ControlError, Output, RequestError, Session};
+    let adapter = controlled_adapter();
+    for (mv, ma, error) in [
+        (12_000, 1_000, RequestError::Range),
+        (9_001, 1_000, RequestError::Step),
+        (9_000, 0, RequestError::Range),
+        (11_000, 3_200, RequestError::Power),
+    ] {
+        assert_eq!(Output::new(adapter, mv, ma), Err(error));
+    }
+    for corrupt in [false, true] {
+        let mut source = controlled_source();
+        source.reject_write = !corrupt;
+        source.corrupt_readback = corrupt;
+        let mut session =
+            Session::start(adapter, Output::new(adapter, 9_000, 1_000).unwrap()).unwrap();
+        let result = run(&mut session, &mut source);
+        assert!(matches!(
+            result,
+            Err(ControlError::Wire(Error::Nack)) | Err(ControlError::Readback)
+        ));
+        assert_eq!(
+            source
+                .commands
+                .iter()
+                .filter(|command| command[0] != 0x0c)
+                .count(),
+            1
+        );
+        assert_eq!(source.level, None);
+    }
+    let mut source = controlled_source();
+    let mut session = Session::start(adapter, Output::new(adapter, 9_000, 1_000).unwrap()).unwrap();
+    run(&mut session, &mut source).unwrap();
+    source.registers.as_mut().unwrap()[0xa0] &= !0x40; // Adapter left SCP mode.
+    session.refresh();
+    assert_eq!(
+        run(&mut session, &mut source),
+        Err(ControlError::Protection)
+    );
 }
