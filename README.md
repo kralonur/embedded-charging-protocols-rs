@@ -73,13 +73,20 @@ The `scp-protocol` crate provides SCP identification and output control:
 - Caller-owned electrical entry, GPIO drive/receive and microsecond clock.
   Damaged or unanswered reads get up to three attempts, each from an idle
   bus; all exits release the data line.
+- Passive decoding (`sniff`) of another terminal's traffic from D− edge
+  timestamps alone: each byte is re-timed from its own bit periods, parity
+  and CRC are checked, and commands are paired with their ACK/NACK replies.
+  A transaction names its protocol (FCP or SCP register) and the output
+  voltage an accepted write requested. Damaged traffic is dropped until the
+  next ping; nothing drives the line.
 - Public draft physical-layer and public driver references are cited in
   `scp-protocol/src/lib.rs`. They are references, not certification claims.
 
 ## Limitations
 
 - **SCP is not hardware-validated.** Simulated wire tests establish encoding
-  and failure behavior, not compatibility with a particular adapter.
+  and failure behavior, not compatibility with a particular adapter or, for
+  passive decoding, phone.
   Electrical entry, timing and default-output checks remain caller duties.
 - Other proprietary and legacy fast-charging protocols are planned as
   separate workspace members.

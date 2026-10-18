@@ -16,25 +16,25 @@ const ALGORITHM: Algorithm<u8> = Algorithm {
     check: 0x8f,
     residue: 0,
 };
-const CRC: Crc<u8, NoTable> = Crc::<u8, NoTable>::new(&ALGORITHM);
+pub(super) const CRC: Crc<u8, NoTable> = Crc::<u8, NoTable>::new(&ALGORITHM);
 /// Single-byte register read command (`SBRRD`, Figure B.18).
-const READ: u8 = 0x0c;
+pub(super) const READ: u8 = 0x0c;
 /// Single/multiple-byte register write commands (Figures B.20–B.23).
-const WRITE: u8 = 0x0b;
-const MULTI_WRITE: u8 = 0x1b;
+pub(super) const WRITE: u8 = 0x0b;
+pub(super) const MULTI_WRITE: u8 = 0x1b;
 /// Acknowledgement codes in the low nibble, `0bxxxx_1000` and `0bxxxx_0011`.
 /// Bit 7 is an adapter status flag, so 0x88 and 0x83 are valid too
 /// (B.9.1, Table B.15). The whole byte is part of the CRC.
-const ACK: u8 = 0x08;
-const NACK: u8 = 0x03;
-const ACK_MASK: u8 = 0x0f;
+pub(super) const ACK: u8 = 0x08;
+pub(super) const NACK: u8 = 0x03;
+pub(super) const ACK_MASK: u8 = 0x0f;
 /// Reply lengths in bytes: ACK, value and CRC (Figure B.19, and
 /// `SC8545_SCP_ACK_AND_CRC_LEN` plus one data byte in `sc8545_protocol.h`);
 /// a NACK is assumed to carry only its CRC.
 const ACK_LEN: usize = 3;
 const NACK_LEN: usize = 2;
 /// Ping length in UI: Table B.4 `Tp-MT/16/Tb-MT`.
-const PING_UI: u32 = 16;
+pub(super) const PING_UI: u32 = 16;
 /// Charger ping response window and the wait before declaring a failure,
 /// in UI (Figure B.6 and Table B.4 `Twait_f`).
 const RESPONSE_UI: u32 = 5;
@@ -42,8 +42,8 @@ const RESPONSE_UI: u32 = 5;
 /// transaction interval `Twait`.
 const SETTLE_UI: u32 = 4;
 /// Received ping duration in µs (Table B.4 `Tp-MR`).
-const PING_MIN_US: u32 = 2_304;
-const PING_MAX_US: u32 = 2_816;
+pub(super) const PING_MIN_US: u32 = 2_304;
+pub(super) const PING_MAX_US: u32 = 2_816;
 /// Transmit timing may run 10% long: Table B.4 `Tb-MT` 144–176 µs,
 /// `Tb/4-MT` 36–44 µs and `Tp-MT` 2304–2816 µs around the nominal value.
 /// Overhead may stretch a ping, never a sync by more than 4 µs.
@@ -197,7 +197,7 @@ fn receive<T: Transport>(phy: &mut T, ui: u32, read: bool) -> Result<Reply, Erro
 }
 
 /// The odd-parity bit that follows `byte` (Appendix B.3.7.1).
-fn parity_bit(byte: u8) -> bool {
+pub(super) fn parity_bit(byte: u8) -> bool {
     byte.count_ones().is_multiple_of(2)
 }
 

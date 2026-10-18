@@ -1,5 +1,6 @@
 //! SCP adapter detection and explicit voltage/current output control.
-//! Detection is read-only; output control lives in [`control`]. No authentication writes.
+//! Detection is read-only; output control lives in [`control`] and passive
+//! decoding of another terminal's traffic in [`sniff`]. No authentication writes.
 //!
 //! Wire reference: public draft “移动通信终端快速充电技术要求和测试方法”,
 //! Appendix B: B.2–B.5 (160 µs UI, sync, odd parity and CRC-8/0x39) and the
@@ -22,6 +23,7 @@
 #![no_std]
 
 pub mod control;
+pub mod sniff;
 mod wire;
 
 /// Nominal bit duration in µs (Appendix B, Table B.4).

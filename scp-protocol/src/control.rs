@@ -10,9 +10,9 @@ const TIMER: u8 = 0xa1;
 const FAULTS: u8 = 0xa3;
 const VOLTAGE_BOUND: u8 = 0xb0;
 const CURRENT_BOUND: u8 = 0xb2;
-const VOLTAGE: u8 = 0xb8;
+pub(super) const VOLTAGE: u8 = 0xb8;
 const CURRENT: u8 = 0xba;
-const SHORT_VOLTAGE: u8 = 0xca;
+pub(super) const SHORT_VOLTAGE: u8 = 0xca;
 const SHORT_CURRENT: u8 = 0xcb;
 /// Control byte 0: output on, protocol mode, D+ protection disabled,
 /// reset, ACK reporting and port-overtemperature protection, respectively.
@@ -31,9 +31,9 @@ const WATCHDOG: u8 = 4;
 const PROTECTION_FAULTS: u8 = 0x1f;
 /// Legacy one-byte voltage uses (mV - 3000) / 10, through 5500 mV;
 /// one-byte current uses mA / 50 (Huawei VSSET/ISSET definitions).
-const SHORT_OFFSET_MV: u16 = 3_000;
+pub(super) const SHORT_OFFSET_MV: u16 = 3_000;
 const SHORT_MAX_MV: u16 = 5_500;
-const SHORT_STEP_MV: u16 = 10;
+pub(super) const SHORT_STEP_MV: u16 = 10;
 const SHORT_STEP_MA: u16 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
