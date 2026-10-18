@@ -37,6 +37,8 @@ pub(crate) const EXTENDED_INCOMPLETE_MASK: u16 = 0x7c00;
 // Power units used by fixed PDO/RDOs and PPS PDO/RDOs (Tables 6.9–6.14, 6.19, 6.21).
 pub(crate) const FIXED_VOLTAGE_UNIT_MV: u32 = 50;
 pub(crate) const FIXED_CURRENT_UNIT_MA: u32 = 10;
+// Battery PDO power unit, in mW (Table 6.11).
+pub(crate) const BATTERY_POWER_UNIT_MW: u32 = 250;
 pub(crate) const PPS_PDO_VOLTAGE_UNIT_MV: u32 = 100;
 // AVS APDO voltage unit, in mV (Table 6.15).
 pub(crate) const AVS_PDO_VOLTAGE_UNIT_MV: u32 = 100;

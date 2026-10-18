@@ -1,14 +1,37 @@
 //! Bounded SOP partner discovery. Raw objects are retained; absent identity
 //! VDOs never acquire default values. No power, data or VCONN role changes.
+use crate::pd_constants::MAX_OBJECTS;
 use usbpd::protocol_layer::message::data::{
     sink_capabilities::{FixedSupply, SinkPowerDataObject, parse_raw_pdo},
     vendor_defined::UFPTypeVDO,
 };
 
-/// PD message payload limit: seven 32-bit objects (Table 6.2).
-const MAX_OBJECTS: usize = 7;
 /// PD SID, Structured VDM 2.1, initiator Discover Identity (Table 6.33).
 pub(crate) const DISCOVER_IDENTITY: u32 = 0xff00_a801;
+/// SVDM 2.1, the highest version this port supports, as VDM Header bits 14..11.
+const SVDM_VERSION_MAX: u32 = DISCOVER_IDENTITY & 0x7800;
+
+/// The SVDM version as VDM Header bits 14..11 (Table 6.33): SVDM 1.0 is 0, its
+/// minor field not defined; an Invalid major 10b/11b is read as 2.x.
+fn svdm_version(vdm: u32) -> u32 {
+    if (vdm >> 13) & 3 == 0 {
+        0
+    } else {
+        0x2000 | vdm & 0x1800
+    }
+}
+
+/// The NAK reply to a received Structured VDM request (Table 7.2), with its SVID
+/// (section 8.6), at the received version or SVDM 2.1 when that is higher
+/// (section 8.5.1); reserved bit 5 is sent as zero. `None` for responses and
+/// Attention (command 6), which get no reply (Table 8.1).
+pub fn svdm_nak(vdm: u32) -> Option<u32> {
+    // Bit 15 Structured; bits 7..6 Command Type: 00b REQ, 10b NAK.
+    if vdm & 0x8000 == 0 || (vdm >> 6) & 3 != 0 || vdm & 0x1f == 6 {
+        return None;
+    }
+    Some(vdm & !(0x7800 | 0x20) | svdm_version(vdm).min(SVDM_VERSION_MAX) | 0x80)
+}
 
 /// Exactly the objects received in one message, including a VDM header if present.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +56,7 @@ impl Objects {
     pub fn as_slice(&self) -> &[u32] {
         &self.raw[..usize::from(self.count)]
     }
-    /// Only the first, fixed vSafe5V Sink PDO carries the flags (Table 6.17).
+    /// Only the first, fixed vSafe5V Sink PDO carries the flags (Table 6.9).
     pub fn sink_fixed(&self) -> Option<FixedSupply> {
         use crate::pd_constants::{FIXED_VOLTAGE_UNIT_MV, VSAFE5V_MV};
         let SinkPowerDataObject::FixedSupply(pdo) = parse_raw_pdo(self.raw[0]) else {
@@ -63,16 +86,18 @@ impl Identity {
     pub fn product(&self) -> u32 {
         self.0.raw[3]
     }
-    /// PD3 SOP UFP v1.3 only (Table 6.39); not a cable or legacy AMA layout.
+    /// PD3 SOP UFP v1.2 or v1.3 (Table 6.40); not a cable or legacy AMA layout.
+    /// Table 6.40 still lists 010b as the deprecated v1.2, which differs only in
+    /// bits 23..22 (Connector Type, Ignored by the receiver).
     pub fn ufp_vdo(&self) -> Option<UFPTypeVDO> {
         if self.objects()[0] & (3 << 13) == 0 || !matches!((self.id_header() >> 27) & 7, 1 | 2) {
             return None;
         }
         let vdo = UFPTypeVDO(*self.objects().get(4)?);
-        (vdo.version() == 3).then_some(vdo)
+        matches!(vdo.version(), 2 | 3).then_some(vdo)
     }
-    /// PD3 SOP DFP v1.2 only (Table 6.40). DRD replies place it after UFP + pad
-    /// (Figure 6.17), even when the UFP VDO version is not understood here.
+    /// PD3 SOP DFP v1.2 only (Table 6.41). DRD replies place it after UFP + pad
+    /// (Figure 6.5), even when the UFP VDO version is not understood here.
     pub fn dfp_vdo(&self) -> Option<Dfp> {
         if self.objects()[0] & (3 << 13) == 0 || !matches!((self.id_header() >> 23) & 7, 1..=3) {
             return None;
@@ -90,7 +115,7 @@ impl Identity {
     }
 }
 
-/// Received DFP v1.2 claims, not a measurement of USB operation (Table 6.40).
+/// Received DFP v1.2 claims, not a measurement of USB operation (Table 6.41).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dfp {
     /// Bits 0, 1, 2: USB 2.0, USB 3.2 and USB4 host capability respectively.
@@ -105,17 +130,18 @@ pub(crate) enum IdentityReply {
     Busy,
 }
 
-/// Table 6.33: only a matching SVDM 1.0/2.0/2.1 response, never an initiator request.
-/// ACK includes the three mandatory identity VDOs; NAK/BUSY have no VDOs.
+/// A Discover Identity response, not a request, another SVID or command, or an
+/// Unstructured VDM (Table 6.33).
+pub(crate) fn is_identity_response(vdm: u32) -> bool {
+    vdm >> 16 == 0xff00 && vdm & 0x8000 != 0 && vdm & 0x1f == 1 && (vdm >> 6) & 3 != 0
+}
+
+/// Table 6.33: a Discover Identity response at SVDM 1.0/2.0/2.1; Object Position
+/// and reserved bit 5 are ignored. ACK includes the three mandatory identity VDOs;
+/// NAK/BUSY have no VDOs.
 pub(crate) fn identity_reply(objects: &[u32]) -> Option<IdentityReply> {
     let raw = *objects.first()?;
-    if raw >> 16 != 0xff00
-        || raw & 0x8000 == 0
-        || (raw >> 13) & 3 > 1
-        || ((raw >> 13) & 3 == 1 && (raw >> 11) & 3 > 1)
-        || (raw >> 8) & 7 != 0
-        || raw & 0x1f != 1
-    {
+    if !is_identity_response(raw) || svdm_version(raw) > SVDM_VERSION_MAX {
         return None;
     }
     match ((raw >> 6) & 3, objects.len()) {
@@ -197,6 +223,15 @@ mod tests {
         raw[5] = 1;
         assert!(Identity::decode(&bytes(&raw)).unwrap().dfp_vdo().is_none());
         raw[5] = 0;
+        raw[4] = 0x4d00_0003; // UFP v1.2: the same fields.
+        assert_eq!(
+            Identity::decode(&bytes(&raw))
+                .unwrap()
+                .ufp_vdo()
+                .unwrap()
+                .usb_highest_speed(),
+            3
+        );
         raw[4] = 0xe100_0000; // Unknown UFP layout is raw; DFP position is unchanged.
         let identity = Identity::decode(&bytes(&raw)).unwrap();
         assert!(identity.ufp_vdo().is_none());

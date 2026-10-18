@@ -1477,10 +1477,24 @@ const SINK_CAPS_PD2: [u8; 20] = [
     0xf4, 0x41, 0x06, 0x00,
 ];
 
+// Through both real gates: a DFP phone's own Discover Identity after PS_RDY is
+// NAKed at its SVDM 1.0 version, never answered Not_Supported (Table 7.2).
+#[test]
+fn pd3_structured_vdm_requests_get_a_nak_and_ready_continues() {
+    let (tx, trace, outcome) = after_contract::<Never>(2, vec![packet(15, 3, &[0xff00_8001])]);
+    assert!(outcome.is_none());
+    assert_eq!(tx.len(), 3);
+    // One object, MessageID 1, PD3, Vendor_Defined, Sink/UFP.
+    assert_eq!(tx_header(&tx[1]), 0x128f);
+    assert_eq!(tx[1][2..], 0xff00_8081u32.to_le_bytes());
+    assert_eq!(tx[2][2..], SINK_CAPS);
+    assert_eq!(trace.not_supported_sent, 0);
+    assert_eq!(trace.contract.unwrap().request.0, 0x2104_b12c);
+}
+
 #[test]
 fn pd3_vdms_and_unsupported_data_get_not_supported_and_ready_continues() {
     for message in [
-        packet(15, 3, &[0xff00_8001]), // Structured Discover Identity (DFP source)
         packet(15, 3, &[0x05ac_0000]), // Unstructured VDM
         packet(10, 3, &[0x0300_0000]), // EPR_Mode outside EPR Mode
         packet(7, 3, &[0x5553_0000]),  // Get_Country_Info

@@ -490,7 +490,8 @@ pub fn describe_sink_pdo(index: usize, raw: u32) -> [u8; SINK_PDO_COLUMNS] {
     result
 }
 
-/// Sink flags and operational current use Sink layouts (Tables 6.14–6.19).
+/// Sink flags and operational current use Sink layouts (Tables 6.9–6.12, 6.14,
+/// 6.15 and 6.17).
 fn sink_pdo_row(index: usize, raw: u32) -> [u8; 24] {
     use usbpd::protocol_layer::message::data::sink_capabilities::{
         SinkPowerDataObject, parse_raw_pdo,
@@ -505,23 +506,29 @@ fn sink_pdo_row(index: usize, raw: u32) -> [u8; 24] {
         | SinkPowerDataObject::SprAvs(_)
         | SinkPowerDataObject::EprAvs(_) => return describe_pdo(index, raw),
         SinkPowerDataObject::VariableSupply(pdo) => {
-            // Table 6.18: 50 mV voltage units, 10 mA operational-current units.
+            // Table 6.12: 50 mV voltage units, 10 mA operational-current units.
             row.text(b"VAR ")
                 .fixed(u32::from(pdo.raw_min_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
                 .text(b"-")
                 .fixed(u32::from(pdo.raw_max_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
                 .text(b"V ")
-                .fixed(u32::from(pdo.raw_operational_current()) * 10, 2)
+                .fixed(
+                    u32::from(pdo.raw_operational_current()) * FIXED_CURRENT_UNIT_MA,
+                    2,
+                )
                 .text(b"A");
         }
         SinkPowerDataObject::Battery(pdo) => {
-            // Table 6.19: 50 mV voltage units, 250 mW operational-power units.
+            // Table 6.11: 50 mV voltage units, 250 mW operational-power units.
             row.text(b"BAT ")
                 .fixed(u32::from(pdo.raw_min_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
                 .text(b"-")
                 .fixed(u32::from(pdo.raw_max_voltage()) * FIXED_VOLTAGE_UNIT_MV, 1)
                 .text(b"V ")
-                .fixed(u32::from(pdo.raw_operational_power()) * 250, 2)
+                .fixed(
+                    u32::from(pdo.raw_operational_power()) * BATTERY_POWER_UNIT_MW,
+                    2,
+                )
                 .text(b"W");
         }
         SinkPowerDataObject::Unknown(_) => {

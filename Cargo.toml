@@ -7,5 +7,5 @@ crc = "3.4.0"
 thiserror = "2.0.21"
 # Reviewed sink and partner-discovery improvements from feat/partner-port-scan.
 # Direct pins keep the engine and adapters on one Driver trait identity.
-usbpd = { git = "https://github.com/kralonur/usbpd", rev = "1abe32e7761dbc1e1b7a5d8829abda93b5e0ca17" }
-usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "1abe32e7761dbc1e1b7a5d8829abda93b5e0ca17" }
+usbpd = { git = "https://github.com/kralonur/usbpd", rev = "16b13a23dafad6c5dd0c18801ee978b785730f83" }
+usbpd-traits = { git = "https://github.com/kralonur/usbpd", rev = "16b13a23dafad6c5dd0c18801ee978b785730f83" }

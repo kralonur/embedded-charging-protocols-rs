@@ -1236,73 +1236,98 @@ fn ready_response_follows_tables_7_1_7_2_and_6_48() {
     let control = |kind: u16| kind;
     let data = |kind: u16| kind | 1 << 12;
     for kind in [1, 13] {
-        assert_eq!(respond(1, control(kind), None), Policy);
-        assert_eq!(respond(2, control(kind), None), Policy);
+        assert_eq!(respond(1, control(kind), &[]), Policy);
+        assert_eq!(respond(2, control(kind), &[]), Policy);
     }
-    assert_eq!(respond(1, control(8), None), SinkCap); // Get_Sink_Cap
-    assert_eq!(respond(2, control(8), None), SinkCap);
+    assert_eq!(respond(1, control(8), &[]), SinkCap); // Get_Sink_Cap
+    assert_eq!(respond(2, control(8), &[]), SinkCap);
     // Table 7.1: Accept, Reject, PS_RDY, Wait are Unexpected in PE_SNK_Ready.
     for kind in [3, 4, 6, 12] {
-        assert_eq!(respond(1, control(kind), None), SoftReset, "{kind}");
-        assert_eq!(respond(2, control(kind), None), SoftReset, "{kind}");
+        assert_eq!(respond(1, control(kind), &[]), SoftReset, "{kind}");
+        assert_eq!(respond(2, control(kind), &[]), SoftReset, "{kind}");
     }
-    assert_eq!(respond(1, control(5), None), Ignore); // PD2 Ping
-    assert_eq!(respond(2, control(5), None), Unsupported); // deprecated PD3 Ping
-    assert_eq!(respond(2, control(16), None), Ignore); // Not_Supported received
-    assert_eq!(respond(1, control(16), None), Unsupported); // reserved in PD2 -> Reject
-    assert_eq!(respond(2, control(24), None), Revision);
-    assert_eq!(respond(1, control(24), None), Unsupported);
-    assert_eq!(respond(2, control(22), None), SinkCapExtended);
-    assert_eq!(respond(1, control(22), None), Unsupported); // reserved in PD2 -> Reject
+    assert_eq!(respond(1, control(5), &[]), Ignore); // PD2 Ping
+    assert_eq!(respond(2, control(5), &[]), Unsupported); // deprecated PD3 Ping
+    assert_eq!(respond(2, control(16), &[]), Ignore); // Not_Supported received
+    assert_eq!(respond(1, control(16), &[]), Unsupported); // reserved in PD2 -> Reject
+    assert_eq!(respond(2, control(24), &[]), Revision);
+    assert_eq!(respond(1, control(24), &[]), Unsupported);
+    assert_eq!(respond(2, control(22), &[]), SinkCapExtended);
+    assert_eq!(respond(1, control(22), &[]), Unsupported); // reserved in PD2 -> Reject
     // Sections 7.12.1/7.13 (PD2 V1.3 6.3.9/6.3.11): DR_Swap and VCONN_Swap get
     // Reject, not Not_Supported.
     for kind in [9, 11] {
-        assert_eq!(respond(1, control(kind), None), Reject, "{kind}");
-        assert_eq!(respond(2, control(kind), None), Reject, "{kind}");
+        assert_eq!(respond(1, control(kind), &[]), Reject, "{kind}");
+        assert_eq!(respond(2, control(kind), &[]), Reject, "{kind}");
     }
-    assert_eq!(respond(2, control(18), None), Status);
-    assert_eq!(respond(1, control(18), None), Unsupported);
+    assert_eq!(respond(2, control(18), &[]), Status);
+    assert_eq!(respond(1, control(18), &[]), Unsupported);
     for kind in [2, 7, 10, 14, 15, 17, 19, 20, 21, 23, 25, 31] {
-        assert_eq!(respond(2, control(kind), None), Unsupported, "{kind}");
+        assert_eq!(respond(2, control(kind), &[]), Unsupported, "{kind}");
     }
-    assert_eq!(respond(2, data(1), None), Policy);
-    assert_eq!(respond(2, data(3), None), Ignore); // BIST
-    assert_eq!(respond(1, data(3), None), Ignore);
-    assert_eq!(respond(2, data(6), None), Alert);
-    assert_eq!(respond(1, data(6), None), Unsupported); // reserved in PD2 -> Reject
-    assert_eq!(respond(2, data(15), None), Unsupported); // sections 8.4/8.5
-    assert_eq!(respond(1, data(15), None), Ignore); // PD2 V1.3 section 6.4.4
+    assert_eq!(respond(2, data(1), &[]), Policy);
+    assert_eq!(respond(2, data(3), &[]), Ignore); // BIST
+    assert_eq!(respond(1, data(3), &[]), Ignore);
+    assert_eq!(respond(2, data(6), &[]), Alert);
+    assert_eq!(respond(1, data(6), &[]), Unsupported); // reserved in PD2 -> Reject
+    assert_eq!(respond(2, data(15), &[]), Unsupported); // sections 8.4/8.5
+    // Table 6.73: Structured requests NAK at the received version; Attention and
+    // responses are Ignored; Unstructured VDMs stay Not_Supported.
+    for (vdm, expected) in [
+        (0xff00_8001u32, SvdmNak(0xff00_8081)),
+        (0xff00_a801, SvdmNak(0xff00_a881)),
+        (0xff01_a046, Ignore),
+        (0xff00_a041, Ignore),
+        (0x1234_0000, Unsupported),
+    ] {
+        assert_eq!(
+            respond(2, data(15), &vdm.to_le_bytes()),
+            expected,
+            "{vdm:08x}"
+        );
+    }
+    assert_eq!(respond(1, data(15), &[]), Ignore); // PD2 V1.3 section 6.4.4
     for kind in [2, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 31] {
-        assert_eq!(respond(2, data(kind), None), Unsupported, "{kind}");
+        assert_eq!(respond(2, data(kind), &[]), Unsupported, "{kind}");
     }
     let extended = |kind: u16| 0x8000 | kind | 1 << 12;
-    assert_eq!(respond(2, extended(3), Some(0x8001)), Unsupported); // single Chunk
-    assert_eq!(respond(2, extended(3), Some(0x0004)), Unsupported); // unchunked
     assert_eq!(
-        respond(2, extended(30), Some(0x8000 | 27)),
+        respond(2, extended(3), &u16::to_le_bytes(0x8001)),
+        Unsupported
+    ); // single Chunk
+    assert_eq!(
+        respond(2, extended(3), &u16::to_le_bytes(0x0004)),
+        Unsupported
+    ); // unchunked
+    assert_eq!(
+        respond(2, extended(30), &u16::to_le_bytes(0x8000 | 27)),
         UnsupportedAfterChunk
     ); // Chunk 0 of 2
     assert_eq!(
-        respond(2, extended(30), Some(0x8000 | 1 << 11 | 40)),
+        respond(2, extended(30), &u16::to_le_bytes(0x8000 | 1 << 11 | 40)),
         UnsupportedAfterChunk
     );
     assert_eq!(
-        respond(2, extended(30), Some(0x8000 | 9 << 11 | 260)),
+        respond(2, extended(30), &u16::to_le_bytes(0x8000 | 9 << 11 | 260)),
         UnsupportedAfterChunk
     );
     for chunk in 10..16 {
         assert_eq!(
-            respond(2, extended(30), Some(0x8000 | chunk << 11 | 40)),
+            respond(
+                2,
+                extended(30),
+                &u16::to_le_bytes(0x8000 | chunk << 11 | 40)
+            ),
             Ignore,
             "{chunk}"
         );
     }
     assert_eq!(
-        respond(2, extended(30), Some(0x8400 | 1 << 11)),
+        respond(2, extended(30), &u16::to_le_bytes(0x8400 | 1 << 11)),
         Unsupported
     ); // Chunk request
-    assert_eq!(respond(2, extended(3), None), Policy); // truncated: fail closed
-    assert_eq!(respond(1, extended(3), Some(0x8001)), Policy); // no PD2 Extended Messages
+    assert_eq!(respond(2, extended(3), &[]), Policy); // truncated: fail closed
+    assert_eq!(respond(1, extended(3), &u16::to_le_bytes(0x8001)), Policy); // no PD2 Extended Messages
 }
 
 #[test]

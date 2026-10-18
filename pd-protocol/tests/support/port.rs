@@ -94,11 +94,15 @@ fn source_only_scan_skips_sink_query_and_preserves_busy_as_a_final_result() {
     });
 }
 
-/// Only the specified VDM response window expires; all other timers pend.
+/// Only the VDM response window expires; all other timers pend (matched by
+/// type, not duration).
 struct IdentityResponseOnly;
 impl usbpd::timers::Timer for IdentityResponseOnly {
-    async fn after_millis(ms: u64) {
-        if ms == usbpd_traits::VDM_RESPONSE_MS {
+    async fn after_millis(_: u64) {
+        pending::<()>().await;
+    }
+    async fn after_timer(timer_type: usbpd::timers::TimerType, ms: u64) {
+        if matches!(timer_type, usbpd::timers::TimerType::VDMResponse) {
             Ticks::after_millis(ms).await;
         } else {
             pending::<()>().await;
@@ -162,7 +166,7 @@ fn malformed_identity_is_a_receive_error_not_a_silent_timeout() {
         state
             .borrow_mut()
             .rx
-            .push_back(packet(15, 3, &[0xff00_a042, 0, 0, 0]));
+            .push_back(packet(15, 3, &[0xff00_a041, 0, 0]));
         assert!(matches!(poll(), Poll::Ready(Err(Error::Peer))));
         assert_ne!(
             selection.partner_info().port.unwrap().identity,

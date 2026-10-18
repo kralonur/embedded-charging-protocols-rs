@@ -4,7 +4,7 @@
 
 - Repository: <https://github.com/kralonur/usbpd>
 - Branch at selection: `feat/partner-port-scan`
-- Full revision: `1abe32e7761dbc1e1b7a5d8829abda93b5e0ca17`
+- Full revision: `16b13a23dafad6c5dd0c18801ee978b785730f83`
 - Partner-discovery review baseline: `99bf0229450fa807e225c9b2f6b85f655c2842f4`
 - EPR review baseline: `9c1325e1ecf6be5f5f53be656ae3658dd7131101`
 - Fork baseline examined: `72008c424eeebd0ea271eb5794ff000b3832a134`
@@ -72,18 +72,24 @@ Discover Identity queries. Responses retain all seven possible message objects;
 identity ACK requires the three mandatory VDOs after the VDM header, while NAK
 and BUSY must contain no further VDOs. Unknown sink APDO subtypes remain raw.
 The engine preserves the negotiated SVDM version across later scans and soft
-resets, resetting it on reattach. Identity's VDMResponseTimer subtracts the
-transport's GoodCRC confirmation delay; unsupported queries and timeouts return
-to Ready with the established contract.
+resets, resetting it on Hard Reset and reattach (USB PD R3.2 V1.2 section
+8.5.1). Identity's VDMResponseTimer runs for the 50 ms maximum of
+tVDMSenderResponse (Table 7.9) and subtracts the transport's GoodCRC
+confirmation delay; unsupported queries and timeouts return to Ready with the
+established contract. In PD3 Ready, Structured VDM requests are answered NAK
+(Table 7.2) and the response timers are matched by type through
+`Timer::after_timer`.
 
 The wrapper separately authorizes each explicitly armed query at fixed 5 V;
 Sink_Capabilities is queried only when the partner advertises dual-role power.
-No local source capability is advertised to unlock this path (section 6.3.8
-permits a Port to request its partner's sink capabilities). This adds no source
-operation, role swap or VCONN permission and is not a compliance claim.
+No local source capability is advertised to unlock this path: section 7.5 lets
+Ports initiate any AMS not explicitly forbidden, and Table 7.4 lists Get Sink
+Capabilities with transmitter Any (R3.2 V1.1 Table 6.77 had not allowed it from
+a Sink-only port). This adds no source operation, role swap or VCONN permission
+and is not a compliance claim.
 
-The fork passed all 50 sink-policy regressions, strict all-target Clippy and a
-`serde,defmt` feature check. Portable sessions cover the supplied wire shapes,
+The fork passed all 90 engine tests, strict all-target Clippy and a
+`serde,defmt` library Clippy check. Portable sessions cover the supplied wire shapes,
 explicit arming, unsupported roles/revisions/voltages, reset cancellation and
 preservation of automatic information-query ordering. Hardware interoperability
 and response timing under load remain unverified.

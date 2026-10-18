@@ -367,15 +367,20 @@ pub enum ReadyResponse {
     SinkCapExtended,
     /// PD3 Get_Status -> truthful Status snapshot (sections 7.15, 9.2.11.2).
     Status,
+    /// PD3 Structured VDM request: NAK with this VDM Header (Table 7.2,
+    /// [`crate::pd_port::svdm_nak`]). This sink initiates Discover Identity, so
+    /// it supports Structured VDMs; Not_Supported would claim it does not.
+    SvdmNak(u32),
 }
 
 /// Classify a received partner SOP Message for an idle explicit contract.
 /// `revision` is the negotiated outgoing revision (1 = PD2, 2 = PD3); `header`
-/// and `extended` are the received Message and Extended Message headers.
-pub fn ready_response(revision: u8, header: u16, extended: Option<u16>) -> ReadyResponse {
+/// is the received Message Header and `body` the bytes after it.
+pub fn ready_response(revision: u8, header: u16, body: &[u8]) -> ReadyResponse {
     let pd3 = revision == crate::pd_cable::PD3_REVISION;
     if header & HEADER_EXTENDED != 0 {
         // Extended Messages do not exist in PD2; malformed frames stay fail-closed.
+        let extended = body.first_chunk().map(|bytes| u16::from_le_bytes(*bytes));
         let Some(extended) = extended.filter(|_| pd3) else {
             return ReadyResponse::Policy;
         };
@@ -411,6 +416,15 @@ pub fn ready_response(revision: u8, header: u16, extended: Option<u16>) -> Ready
         MessageType::Data(Data::Bist) => ReadyResponse::Ignore,
         MessageType::Data(Data::Alert) if pd3 => ReadyResponse::Alert,
         MessageType::Data(Data::VendorDefined) if !pd3 => ReadyResponse::Ignore,
+        // Table 7.2: Structured requests NAK; responses and Attention are
+        // Ignored; Unstructured VDMs stay Not_Supported.
+        MessageType::Data(Data::VendorDefined) => {
+            match body.first_chunk().map(|bytes| u32::from_le_bytes(*bytes)) {
+                Some(vdm) if vdm & 0x8000 != 0 => crate::pd_port::svdm_nak(vdm)
+                    .map_or(ReadyResponse::Ignore, ReadyResponse::SvdmNak),
+                _ => ReadyResponse::Unsupported,
+            }
+        }
         _ => ReadyResponse::Unsupported,
     }
 }
@@ -1716,13 +1730,8 @@ impl<L: Limits> Selection<L> {
                 }
             }
         }
-        // Dual-Role Power, bit 29 of the first fixed Source PDO (Table 6.9).
-        self.dual_role_power.set(
-            capabilities
-                .pdos()
-                .first()
-                .is_some_and(|pdo| pdo.to_raw() & (1 << 29) != 0),
-        );
+        // Dual-Role Power of the Fixed 5V Source PDO (Table 6.8).
+        self.dual_role_power.set(capabilities.dual_role_power());
         self.epr_capable.set(capabilities.epr_mode_capable());
         self.options.set(options);
         self.range_max_mv.set(range_max_mv);
@@ -1957,6 +1966,8 @@ struct State<'a, L: Limits> {
     transitioning: bool,
     partner_revision: u8,
     unsupported_reply: Option<ControlMessageType>,
+    /// The VDM Header of the one NAK owed to a Structured VDM request.
+    vdm_nak_reply: Option<u32>,
     /// BIST Test Data Mode (section 6.4.3.1): every received Message is
     /// discarded after its GoodCRC and nothing is transmitted until Hard Reset.
     bist_test_data: bool,
@@ -2016,6 +2027,7 @@ impl<L: Limits> State<'_, L> {
         self.caps_reply = false;
         self.pps_status_query = false;
         self.unsupported_reply = None;
+        self.vdm_nak_reply = None;
         self.revision_reply = false;
         self.sink_caps_reply = false;
         self.skedb_reply = false;
@@ -2133,6 +2145,7 @@ impl<L: Limits> Trial<L> {
             transitioning: false,
             partner_revision: 0,
             unsupported_reply: None,
+            vdm_nak_reply: None,
             bist_test_data: false,
             bist_carrier: false,
             revision_reply: false,
@@ -2236,6 +2249,7 @@ impl<L: Limits> Trial<L> {
             transitioning: false,
             partner_revision: 0,
             unsupported_reply: None,
+            vdm_nak_reply: None,
             bist_test_data: false,
             bist_carrier: false,
             revision_reply: false,
@@ -3114,6 +3128,18 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                     },
                 )
         };
+        // The NAK owed to a Structured VDM request: one Data Object,
+        // Vendor_Defined, Sink/UFP, at the negotiated revision (Table 7.2).
+        let is_vdm_nak = self.shared.borrow().mode == Mode::Maintained && bytes.len() == 6 && {
+            let state = self.shared.borrow();
+            let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+            !state.request_in_flight
+                && state.reset == Reset::Idle
+                && header & HEADER_WITHOUT_ID_MASK
+                    == 1 << 12 | u16::from(state.partner_revision) << 6 | 15
+                && state.vdm_nak_reply
+                    == Some(u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]))
+        };
         let is_revision_reply =
             self.shared.borrow().mode == Mode::Maintained && bytes.len() == 6 && {
                 let state = self.shared.borrow();
@@ -3344,6 +3370,8 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                     trace.borrow_mut().not_supported_sent += 1;
                 }
                 state.unsupported_reply = None;
+            } else if is_vdm_nak {
+                state.vdm_nak_reply = None;
             } else if is_sink_caps {
                 state.sink_caps_reply = false;
                 if let Some(trace) = state.trace {
@@ -3472,6 +3500,7 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
         let (ready, revision, pps_status_pending, maintained, query_pending) = {
             let mut state = self.shared.borrow_mut();
             state.unsupported_reply = None;
+            state.vdm_nak_reply = None;
             state.revision_reply = false;
             state.sink_caps_reply = false;
             state.skedb_reply = false;
@@ -3828,7 +3857,7 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
             let serviced = {
                 let mut state = self.shared.borrow_mut();
                 let in_ams = maintained && state.request_in_flight && !state.transitioning;
-                let serviced = match ready_response(revision, header, extended) {
+                let serviced = match ready_response(revision, header, &buffer[2..length]) {
                     ReadyResponse::Unsupported | ReadyResponse::UnsupportedAfterChunk
                         if ready && framed =>
                     {
@@ -3864,7 +3893,7 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
             self.shared.borrow_mut().fail(Error::Peer);
             return pending().await;
         };
-        let response = ready_response(revision, header, None);
+        let response = ready_response(revision, header, &buffer[2..length]);
         let unsupported = if revision == 1 {
             ControlMessageType::Reject
         } else {
@@ -4033,12 +4062,17 @@ impl<D: Driver, L: Limits> Driver for Borrowed<'_, '_, D, L> {
                 if ready
                     && matches!(
                         response,
-                        ReadyResponse::Alert | ReadyResponse::Ignore | ReadyResponse::Unsupported
+                        ReadyResponse::Alert
+                            | ReadyResponse::Ignore
+                            | ReadyResponse::Unsupported
+                            | ReadyResponse::SvdmNak(_)
                     ) =>
             {
                 let mut state = self.shared.borrow_mut();
-                if response == ReadyResponse::Unsupported {
-                    state.unsupported_reply = Some(unsupported);
+                match response {
+                    ReadyResponse::Unsupported => state.unsupported_reply = Some(unsupported),
+                    ReadyResponse::SvdmNak(nak) => state.vdm_nak_reply = Some(nak),
+                    _ => {}
                 }
                 if let Some(trace) = state.trace {
                     trace.borrow_mut().packets_serviced += 1;

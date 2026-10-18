@@ -617,7 +617,8 @@ pub const GET_SOURCE_CAP_EXTENDED_HEADER: u16 = 0x0091;
 pub const GET_REVISION_HEADER: u16 = 0x0098;
 pub const GET_SOURCE_INFO_HEADER: u16 = 0x0097;
 pub const GET_STATUS_HEADER: u16 = 0x0092;
-/// PD3 Sink/UFP Get_Sink_Cap and one-object SOP Discover Identity (Tables 6.5, 6.33).
+/// PD3 Sink/UFP Get_Sink_Cap and one-object SOP Discover Identity (Tables 6.2,
+/// 6.4, 6.5 and 6.33).
 pub const GET_SINK_CAP_HEADER: u16 = 0x0088;
 pub const DISCOVER_IDENTITY_HEADER: u16 = 0x108f;
 
@@ -754,7 +755,12 @@ pub fn query_answer(query: PartnerQuery, frame: &[u8]) -> Reply {
         return Reply::Malformed;
     }
     if query == PartnerQuery::DiscoverIdentity {
-        use crate::pd_port::{IdentityReply, Objects, identity_reply};
+        use crate::pd_port::{IdentityReply, Objects, identity_reply, is_identity_response};
+        // A request, Attention or other VDM is not this answer: an unexpected
+        // Message in the AMS, answered with Soft_Reset (Table 7.1).
+        if !is_identity_response(u32::from_le_bytes([frame[2], frame[3], frame[4], frame[5]])) {
+            return Reply::Other;
+        }
         return match Objects::decode(&frame[2..])
             .and_then(|objects| identity_reply(objects.as_slice()))
         {
@@ -792,12 +798,20 @@ mod tests {
             query_answer(DiscoverIdentity, &frame(0x49af, &objects)),
             Reply::Answer
         );
-        for vdm in [0x1234_a041u32, 0xff00_a042, 0xff00_a001, 0xff00_a141] {
+        // Another SVID or command, or the partner's own request, is unexpected
+        // (Soft_Reset); an Invalid minor is malformed; Object Position is ignored.
+        for (vdm, reply) in [
+            (0x1234_a041u32, Reply::Other),
+            (0xff00_a042, Reply::Other),
+            (0xff00_a001, Reply::Other),
+            (0xff00_b041, Reply::Malformed),
+            (0xff00_a141, Reply::Answer),
+        ] {
             let mut wrong = objects;
             wrong[0] = vdm;
             assert_eq!(
                 query_answer(DiscoverIdentity, &frame(0x49af, &wrong)),
-                Reply::Malformed
+                reply
             );
         }
         assert_eq!(
