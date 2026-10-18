@@ -8,8 +8,9 @@ hardware registers, GPIOs, ADC measurements or storage: the physical transport
 the caller.
 
 > **Note:** USB Power Delivery (`pd-protocol`) and Quick Charge 2.0 and 3.0
-> (`qc-protocol`) are implemented so far. Review the implementation and
-> validate it on your hardware before relying on it.
+> (`qc-protocol`) are implemented, with experimental read-only SCP adapter
+> identification (`scp-protocol`). Review the implementation and validate
+> it on your hardware before relying on it.
 
 ## Features
 
@@ -57,10 +58,27 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
   pair of measured D+/D− voltages asks for, as a charger reads it, for
   watching a device that drives Quick Charge itself.
 
+The `scp-protocol` crate provides experimental read-only SCP identification:
+
+- Three whitelisted adapter-type registers only; no register-write API,
+  voltage/current requests or authentication.
+- Checked master/slave ping sequencing, source-clock synchronization,
+  quarter-UI framing, odd parity, CRC-8 and ACK/NACK validation.
+- Modern programmable-mode identification and the two-register legacy
+  fallback. A ping alone does not establish SCP support.
+- Caller-owned electrical entry, GPIO drive/receive and microsecond clock.
+  Damaged or unanswered reads get up to three attempts, each from an idle
+  bus; all exits release the data line.
+- Public draft physical-layer and public driver references are cited in
+  `scp-protocol/src/lib.rs`. They are references, not certification claims.
+
 ## Limitations
 
-- **USB PD and Quick Charge 2.0/3.0 only.** Other proprietary and legacy
-  fast-charging protocols are planned as separate workspace members.
+- **SCP is not hardware-validated.** Simulated wire tests establish encoding
+  and failure behavior, not compatibility with a particular adapter.
+  Electrical entry, timing and default-output checks remain caller duties.
+- Other proprietary and legacy fast-charging protocols are planned as
+  separate workspace members.
 - **Quick Charge from public sources:** Qualcomm does not publish the
   specification. Levels and timings come from the USB Battery Charging
   Specification 1.2 and Quick Charge charger IC datasheets, cited in

@@ -1,8 +1,10 @@
 [workspace]
-members = ["pd-protocol", "qc-protocol"]
+members = ["pd-protocol", "qc-protocol", "scp-protocol"]
 resolver = "3"
 
 [workspace.dependencies]
+crc = "3.4.0"
+thiserror = "2.0.21"
 # Reviewed sink improvements from feat/sink-protocol-improvements.
 # Direct pins keep the engine and adapters on one Driver trait identity.
 usbpd = { git = "https://github.com/kralonur/usbpd", rev = "99bf0229450fa807e225c9b2f6b85f655c2842f4" }

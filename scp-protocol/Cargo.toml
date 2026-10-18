@@ -1,0 +1,10 @@
+[package]
+name = "scp-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Allocation-free, read-only SCP adapter detection with caller-owned physical transport."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+crc = { workspace = true, default-features = false }
+thiserror = { workspace = true, default-features = false }
