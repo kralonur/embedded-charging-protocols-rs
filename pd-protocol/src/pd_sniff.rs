@@ -457,9 +457,41 @@ pub fn describe_pdo(index: usize, raw: u32) -> [u8; 24] {
     row.bytes
 }
 
-/// One received Sink PDO. Sink flags and operational-current fields are not
-/// interpreted as Source capabilities (Tables 6.14–6.19).
-pub fn describe_sink_pdo(index: usize, raw: u32) -> [u8; 24] {
+/// Room for a seven-object index, voltage/current ranges and inline watts.
+/// Fits a 36-column detail display without truncating the current or power unit.
+pub const SINK_PDO_COLUMNS: usize = 36;
+
+/// One received Sink PDO with calculated watts in parentheses. Range-based
+/// profiles use the top voltage, not a measured or guaranteed charging rate.
+pub fn describe_sink_pdo(index: usize, raw: u32) -> [u8; SINK_PDO_COLUMNS] {
+    let description = sink_pdo_row(index, raw);
+    let length = description
+        .iter()
+        .rposition(|&byte| byte != b' ')
+        .map_or(0, |last| last + 1);
+    let mut result = [b' '; SINK_PDO_COLUMNS];
+    result[..length].copy_from_slice(&description[..length]);
+    if let Some(mw) = sink_power_mw(raw) {
+        let mut power = Row::new();
+        power.text(b" (");
+        if mw.is_multiple_of(MILLI_PER_UNIT) {
+            power.decimal(mw / MILLI_PER_UNIT);
+        } else {
+            power.fixed(mw, if mw.is_multiple_of(100) { 1 } else { 2 });
+        }
+        power.text(b"W)");
+        for (cell, &byte) in result[length..]
+            .iter_mut()
+            .zip(&power.bytes[..power.column()])
+        {
+            *cell = byte;
+        }
+    }
+    result
+}
+
+/// Sink flags and operational current use Sink layouts (Tables 6.14–6.19).
+fn sink_pdo_row(index: usize, raw: u32) -> [u8; 24] {
     use usbpd::protocol_layer::message::data::sink_capabilities::{
         SinkPowerDataObject, parse_raw_pdo,
     };
@@ -499,69 +531,42 @@ pub fn describe_sink_pdo(index: usize, raw: u32) -> [u8; 24] {
     row.bytes
 }
 
-/// Power derived from the reported Sink PDO, not a measured charging rate.
-/// Range-based PDOs use the top of the range, not a guarantee at every voltage.
-pub fn describe_sink_power(index: usize, raw: u32) -> [u8; 24] {
+/// Derived mW for PDOs carrying current. Battery/EPR AVS already carry watts.
+fn sink_power_mw(raw: u32) -> Option<u32> {
     use usbpd::protocol_layer::message::data::sink_capabilities::{
         SinkPowerDataObject, parse_raw_pdo,
     };
-    // Sink Battery PDO operational power units, Table 6.19.
-    const BATTERY_POWER_UNIT_MW: u32 = 250;
     let vi = |mv: u32, ma: u32| mv * ma / MILLI_PER_UNIT;
-    let (mw, suffix): (u32, &[u8]) = match parse_raw_pdo(raw) {
-        SinkPowerDataObject::FixedSupply(pdo) => (
-            vi(
-                u32::from(pdo.raw_voltage()) * FIXED_VOLTAGE_UNIT_MV,
-                u32::from(pdo.raw_operational_current()) * FIXED_CURRENT_UNIT_MA,
-            ),
-            b" V*I",
+    Some(match parse_raw_pdo(raw) {
+        SinkPowerDataObject::FixedSupply(pdo) => vi(
+            u32::from(pdo.raw_voltage()) * FIXED_VOLTAGE_UNIT_MV,
+            u32::from(pdo.raw_operational_current()) * FIXED_CURRENT_UNIT_MA,
         ),
-        SinkPowerDataObject::VariableSupply(pdo) => (
-            vi(
-                u32::from(pdo.raw_max_voltage()) * FIXED_VOLTAGE_UNIT_MV,
-                u32::from(pdo.raw_operational_current()) * FIXED_CURRENT_UNIT_MA,
-            ),
-            b" TOP V*I",
+        SinkPowerDataObject::VariableSupply(pdo) => vi(
+            u32::from(pdo.raw_max_voltage()) * FIXED_VOLTAGE_UNIT_MV,
+            u32::from(pdo.raw_operational_current()) * FIXED_CURRENT_UNIT_MA,
         ),
-        SinkPowerDataObject::Pps(pdo) => (
-            vi(
-                u32::from(pdo.raw_max_voltage()) * PPS_PDO_VOLTAGE_UNIT_MV,
-                u32::from(pdo.raw_max_current()) * PPS_CURRENT_UNIT_MA,
-            ),
-            b" TOP V*I",
+        SinkPowerDataObject::Pps(pdo) => vi(
+            u32::from(pdo.raw_max_voltage()) * PPS_PDO_VOLTAGE_UNIT_MV,
+            u32::from(pdo.raw_max_current()) * PPS_CURRENT_UNIT_MA,
         ),
-        SinkPowerDataObject::Battery(pdo) => (
-            u32::from(pdo.raw_operational_power()) * BATTERY_POWER_UNIT_MW,
-            b" PDO",
-        ),
-        SinkPowerDataObject::SprAvs(pdo) => (
-            vi(
-                SPR_AVS_15V_MAX_MV,
-                u32::from(pdo.raw_max_current_15v()) * AVS_PDO_CURRENT_UNIT_MA,
-            )
-            .max(vi(
-                SPR_AVS_MAX_MV,
-                u32::from(pdo.raw_max_current_20v()) * AVS_PDO_CURRENT_UNIT_MA,
-            )),
-            b" TOP V*I",
-        ),
-        SinkPowerDataObject::EprAvs(raw) => ((raw & 0xff) * MILLI_PER_UNIT, b" PDO"),
-        SinkPowerDataObject::Unknown(_) => return describe_sink_pdo(index, raw),
-    };
-    let mut row = Row::new();
-    row.decimal(index as u32 + 1)
-        .text(b" ")
-        .fixed(mw, 2)
-        .text(b"W")
-        .text(suffix);
-    row.bytes
+        SinkPowerDataObject::SprAvs(pdo) => vi(
+            SPR_AVS_15V_MAX_MV,
+            u32::from(pdo.raw_max_current_15v()) * AVS_PDO_CURRENT_UNIT_MA,
+        )
+        .max(vi(
+            SPR_AVS_MAX_MV,
+            u32::from(pdo.raw_max_current_20v()) * AVS_PDO_CURRENT_UNIT_MA,
+        )),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn text(row: [u8; 24]) -> std::string::String {
+    fn text<const N: usize>(row: [u8; N]) -> std::string::String {
         std::string::String::from_utf8(row.to_vec())
             .unwrap()
             .trim_end()
@@ -570,30 +575,39 @@ mod tests {
 
     #[test]
     fn sink_pdos_use_received_current_and_variable_layout() {
-        assert_eq!(text(describe_sink_pdo(0, 0x3601_912c)), "1 FIX 5.00V 3.00A");
+        assert_eq!(
+            text(describe_sink_pdo(0, 0x3601_912c)),
+            "1 FIX 5.00V 3.00A (15W)"
+        );
         assert_eq!(
             text(describe_sink_pdo(2, 0x8b41_90c8)),
-            "3 VAR 5.0-9.0V 2.00A"
+            "3 VAR 5.0-9.0V 2.00A (18W)"
         );
         assert_eq!(
             text(describe_sink_pdo(3, 0xc0dc_212c)),
-            "4 PPS 3.3-11.0V 2.20A"
+            "4 PPS 3.3-11.0V 2.20A (24.2W)"
         );
     }
 
     #[test]
     fn sink_power_is_derived_from_each_received_profile_not_a_measured_peak() {
         for (raw, expected) in [
-            (0x3601_912c, "1 15.00W V*I"),
-            (0x0002_d0c8, "1 18.00W V*I"),
-            (0x8b41_90c8, "1 18.00W TOP V*I"),
-            (0xc0dc_212c, "1 24.20W TOP V*I"),
-            (0xc0dc_212e, "1 25.30W TOP V*I"),
-            (0x4b41_9048, "1 18.00W PDO"),
-            (0xe003_20c8, "1 40.00W TOP V*I"),
+            (0x3601_912c, "1 FIX 5.00V 3.00A (15W)"),
+            (0x0002_d0c8, "1 FIX 9.00V 2.00A (18W)"),
+            (0x8b41_90c8, "1 VAR 5.0-9.0V 2.00A (18W)"),
+            (0xc0dc_212c, "1 PPS 3.3-11.0V 2.20A (24.2W)"),
+            (0xc0dc_212e, "1 PPS 3.3-11.0V 2.30A (25.3W)"),
+            (0x4b41_9048, "1 BAT 5.0-9.0V 18.00W"),
+            (0xe003_20c8, "1 AVS 2.00A/2.00A (40W)"),
             (0xf000_0000, "1 RAW F0000000"),
         ] {
-            assert_eq!(text(describe_sink_power(0, raw)), expected);
+            assert_eq!(text(describe_sink_pdo(0, raw)), expected);
+        }
+        // Encoded maxima must retain both units and the closing parenthesis.
+        for raw in [0x3fff_ffff, 0xbfff_ffff, 0xcfff_ffff, 0xefff_ffff] {
+            let line = text(describe_sink_pdo(6, raw));
+            assert!(line.ends_with("W)"), "truncated profile: {line}");
+            assert!(line.contains("A ("));
         }
     }
 
