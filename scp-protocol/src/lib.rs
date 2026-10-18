@@ -167,7 +167,8 @@ const EXTEND_CURRENT_STEP_MA: u16 = 10;
 /// Detect programmable SCP and read its specification registers when present.
 /// Each read is retried on damaged traffic. Type0 falls back to the legacy
 /// registers only on a NACK or a valid non-programmable value, never on
-/// corrupt traffic or a timeout. D− is released on every exit.
+/// corrupt traffic or a timeout; a NACKed legacy register means no SCP.
+/// D− is released on every exit.
 pub fn detect<T: Transport>(phy: &mut T) -> Result<Adapter, Error<T::Error>> {
     let mut detection = Detection::new();
     let result = loop {
@@ -244,9 +245,11 @@ impl Detection {
                 }
             }
             // Legacy identification: Type1 (`0x80`) flags type-B and
-            // `LegacyType` (`0x81`) confirms it.
+            // `LegacyType` (`0x81`) confirms it. A NACK of either is an
+            // answer without SCP; Huawei's FCP driver takes a failed `0x80`
+            // read for an FCP-only adapter.
             Register::Type1 => {
-                let type1 = wire::read(phy, register)?;
+                let type1 = read_optional(phy, register)?.ok_or(Error::NotScp)?;
                 if type1 & TYPE_B == 0 {
                     return Err(Error::NotScp);
                 }
@@ -254,7 +257,7 @@ impl Detection {
                 Register::LegacyType
             }
             Register::LegacyType => {
-                if wire::read(phy, register)? != LEGACY_TYPE_B {
+                if read_optional(phy, register)? != Some(LEGACY_TYPE_B) {
                     return Err(Error::NotScp);
                 }
                 self.modes = Modes::LowVoltage;

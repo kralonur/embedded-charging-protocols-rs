@@ -286,9 +286,17 @@ fn legacy_detection_requires_both_type_registers() {
         assert_eq!(decode(&packet[10..18]), register);
         assert_eq!(decode(&packet[19..27]), checksum(&[0x0c, register]));
     }
-    let mut source = Source::new([Reply::Ack(0xa0), Reply::Ack(0x80)]);
-    assert_eq!(detect(&mut source), Err(Error::NotScp));
-    assert_eq!(source.level, None);
+    // A NACK at either legacy register, as from an FCP-only adapter, means
+    // no SCP rather than an undetermined result.
+    for replies in [
+        &[Reply::Ack(0xa0), Reply::Ack(0x80)][..],
+        &[Reply::Nack, Reply::Nack],
+        &[Reply::Nack, Reply::Ack(0x90), Reply::Nack],
+    ] {
+        let mut source = Source::new(replies.iter().copied());
+        assert_eq!(detect(&mut source), Err(Error::NotScp));
+        assert_eq!(source.level, None);
+    }
 }
 
 #[test]
