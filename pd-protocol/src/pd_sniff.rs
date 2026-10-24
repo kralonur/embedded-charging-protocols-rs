@@ -435,11 +435,26 @@ pub fn describe_pdo(index: usize, raw: u32) -> [u8; 24] {
                 .text(b"A");
         }
         0b1110 => {
+            // The APDO has no voltage field: its range follows from the 15-20 V
+            // current, zero for a 9-15 V Source (Table 6.15). One current when
+            // both ranges share it.
+            let ma_15v = ((raw >> 10) & 0x3ff) * AVS_PDO_CURRENT_UNIT_MA;
+            let ma_20v = (raw & 0x3ff) * AVS_PDO_CURRENT_UNIT_MA;
+            let max_mv = if ma_20v == 0 {
+                SPR_AVS_15V_MAX_MV
+            } else {
+                SPR_AVS_MAX_MV
+            };
             row.text(b"AVS ")
-                .fixed(((raw >> 10) & 0x3ff) * 10, 2)
-                .text(b"A/")
-                .fixed((raw & 0x3ff) * 10, 2)
+                .decimal(SPR_AVS_MIN_MV / MILLI_PER_UNIT)
+                .text(b"-")
+                .decimal(max_mv / MILLI_PER_UNIT)
+                .text(b"V ")
+                .fixed(ma_15v, 2)
                 .text(b"A");
+            if ma_20v != 0 && ma_20v != ma_15v {
+                row.text(b"/").fixed(ma_20v, 2).text(b"A");
+            }
         }
         0b1101 => {
             row.text(b"EAVS ")
@@ -605,7 +620,7 @@ mod tests {
             (0xc0dc_212c, "1 PPS 3.3-11.0V 2.20A (24.2W)"),
             (0xc0dc_212e, "1 PPS 3.3-11.0V 2.30A (25.3W)"),
             (0x4b41_9048, "1 BAT 5.0-9.0V 18.00W"),
-            (0xe003_20c8, "1 AVS 2.00A/2.00A (40W)"),
+            (0xe003_20c8, "1 AVS 9-20V 2.00A (40W)"),
             (0xf000_0000, "1 RAW F0000000"),
         ] {
             assert_eq!(text(describe_sink_pdo(0, raw)), expected);
@@ -708,7 +723,12 @@ mod tests {
         // SPR AVS 3.00 A (15 V) / 2.25 A (20 V); EPR AVS 15-28 V 140 W.
         assert_eq!(
             text(describe_pdo(3, 0xe000_0000 | (300 << 10) | 225)),
-            "4 AVS 3.00A/2.25A"
+            "4 AVS 9-20V 3.00A/2.25A"
+        );
+        // No 15-20 V current: a 9-15 V Source.
+        assert_eq!(
+            text(describe_pdo(3, 0xe000_0000 | (300 << 10))),
+            "4 AVS 9-15V 3.00A"
         );
         assert_eq!(
             text(describe_pdo(
