@@ -1481,10 +1481,12 @@ fn spr_avs_requests_follow_tables_6_15_and_6_22() {
         "SPR AVS off"
     );
 
-    // Sink_Capabilities: an SPR AVS APDO to 20 V at 5 A after the PPS APDO
-    // (Table 6.15), and SKEDB Sink Modes bit 5 (Table 6.61).
+    // Sink_Capabilities: an SPR AVS APDO to 20 V at 5 A (Table 6.15) just
+    // before the PPS APDO (sections 6.4.1.1, 6.4.1.2), and SKEDB Sink Modes
+    // bit 5 (Table 6.61).
     let (objects, count) = pd_spr::sink_capabilities::<Avs>(true).unwrap();
-    assert_eq!(objects[count - 1], 0xe000_0000 | 500 << 10 | 500);
+    assert_eq!(objects[count - 2], 0xe000_0000 | 500 << 10 | 500);
+    assert_eq!(objects[count - 1] >> 28, 0b1100);
     assert_eq!(
         pd_spr::sink_capabilities_extended::<Avs>().unwrap()[17],
         0b10_0011
