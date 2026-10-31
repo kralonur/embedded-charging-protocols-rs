@@ -1,6 +1,7 @@
 //! Boundary tests exercise the complete wire exchange against a scheduled
 //! source, including all sync/parity/CRC checks and legacy type fallback.
-use scp_protocol::{Capabilities, Error, Modes, Transport, detect};
+use single_wire_protocols::scp::{Capabilities, Modes, detect};
+use single_wire_protocols::{Error, Transport};
 use std::collections::VecDeque;
 
 const UI: u64 = 160;
@@ -351,8 +352,8 @@ fn absent_or_slow_transport_fails_bounded_and_releases() {
     assert_eq!(source.level, None);
 }
 
-fn controlled_adapter() -> scp_protocol::Adapter {
-    scp_protocol::Adapter {
+fn controlled_adapter() -> single_wire_protocols::scp::Adapter {
+    single_wire_protocols::scp::Adapter {
         modes: Modes::HighVoltage,
         type0: Some(0x1c),
         type1: None,
@@ -380,10 +381,10 @@ fn controlled_source() -> Source {
 // Output writes must be atomic, acknowledged, read back and ordered so
 // changing setpoints cannot briefly exceed the adapter's power rating.
 /// Run every queued control transaction, stopping at the first error.
-fn run<T: scp_protocol::Transport>(
-    session: &mut scp_protocol::control::Session,
+fn run<T: single_wire_protocols::Transport>(
+    session: &mut single_wire_protocols::scp::control::Session,
     phy: &mut T,
-) -> Result<(), scp_protocol::control::ControlError<T::Error>> {
+) -> Result<(), single_wire_protocols::control::ControlError<T::Error>> {
     while session.busy() {
         session.poll(phy)?;
     }
@@ -392,7 +393,8 @@ fn run<T: scp_protocol::Transport>(
 
 #[test]
 fn output_control_checks_writes_preserves_protections_and_stops() {
-    use scp_protocol::control::{Output, RequestError, Session};
+    use single_wire_protocols::control::RequestError;
+    use single_wire_protocols::scp::control::{Output, Session};
     let adapter = controlled_adapter();
     let output = Output::new(adapter, 11_000, 3_150).unwrap();
     let mut source = controlled_source();
@@ -433,7 +435,8 @@ fn output_control_checks_writes_preserves_protections_and_stops() {
 
 #[test]
 fn output_control_rejects_bad_requests_and_ambiguous_writes_without_retry() {
-    use scp_protocol::control::{ControlError, Output, RequestError, Session};
+    use single_wire_protocols::control::{ControlError, RequestError};
+    use single_wire_protocols::scp::control::{Output, Session};
     let adapter = controlled_adapter();
     for (mv, ma, error) in [
         (12_000, 1_000, RequestError::Range),
@@ -485,8 +488,8 @@ fn fcp_source() -> Source {
     source
 }
 
-fn fcp_detect(source: &mut Source) -> Result<scp_protocol::fcp::Adapter, Error<()>> {
-    let mut detection = scp_protocol::fcp::Detection::new();
+fn fcp_detect(source: &mut Source) -> Result<single_wire_protocols::fcp::Adapter, Error<()>> {
+    let mut detection = single_wire_protocols::fcp::Detection::new();
     loop {
         if let Some(adapter) = detection.poll(source)? {
             return Ok(adapter);
@@ -498,8 +501,8 @@ fn fcp_detect(source: &mut Source) -> Result<scp_protocol::fcp::Adapter, Error<(
 // anything the adapter does not list is refused before any write.
 #[test]
 fn fcp_detects_listed_voltages_and_applies_only_checked_writes() {
-    use scp_protocol::control::{ControlError, RequestError};
-    use scp_protocol::fcp::{Output, Session};
+    use single_wire_protocols::control::{ControlError, RequestError};
+    use single_wire_protocols::fcp::{Output, Session};
     let mut source = fcp_source();
     let adapter = fcp_detect(&mut source).unwrap();
     assert_eq!(adapter.levels(), [5_200, 9_000, 12_000]);
@@ -507,7 +510,10 @@ fn fcp_detects_listed_voltages_and_applies_only_checked_writes() {
     assert_eq!(Output::new(adapter, 10_000), Err(RequestError::Range));
     // A level the one-byte register cannot hold would be written as another.
     for levels in [[5_000, 9_050], [5_000, 25_600]] {
-        assert_eq!(scp_protocol::fcp::Adapter::new(&levels, None), None);
+        assert_eq!(
+            single_wire_protocols::fcp::Adapter::new(&levels, None),
+            None
+        );
     }
     // A fault latched before the session is read to clear it, not judged.
     source.registers.as_mut().unwrap()[0x28] = 0x08;

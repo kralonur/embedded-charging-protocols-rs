@@ -1,6 +1,6 @@
 //! FCP: the fixed output voltages an adapter offers over the same PHY and
 //! entry as SCP. Registers and sequencing come from Huawei's
-//! `adapter_protocol_fcp.c` / `.h` at the crate docs' kernel commit:
+//! `adapter_protocol_fcp.c` / `.h` at the SCP module's kernel commit:
 //! <https://github.com/Huawei-Dev/android_kernel_huawei_kirin970/blob/f99bc558da4d80203fe5a50143f244b27faab1d2/drivers/hwpower/cc_protocol/adapter_protocol/adapter_protocol_fcp/adapter_protocol_fcp.c>.
 
 use crate::control::{ControlError, RequestError};

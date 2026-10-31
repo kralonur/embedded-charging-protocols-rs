@@ -1,7 +1,6 @@
 //! SCP adapter detection and explicit voltage/current output control.
-//! Detection is read-only; output control lives in [`control`], FCP's fixed
-//! voltages over the same PHY in [`fcp`] and passive decoding of another
-//! terminal's traffic in [`sniff`]. No authentication writes.
+//! Detection is read-only; output control lives in [`control`]. No
+//! authentication writes.
 //!
 //! Wire reference: public draft “移动通信终端快速充电技术要求和测试方法”,
 //! Appendix B: B.2–B.5 (160 µs UI, sync, odd parity and CRC-8/0x39) and the
@@ -21,65 +20,10 @@
 //! The caller establishes BC1.2 entry and validates its electrical interface.
 //! A ping alone is not SCP identification. Only a valid register response
 //! identifying a programmable adapter produces [`Adapter`].
-#![no_std]
+
+use crate::{Error, Transport, wire};
 
 pub mod control;
-pub mod fcp;
-pub mod sniff;
-mod wire;
-
-/// Nominal bit duration in µs (Appendix B, Table B.4).
-pub const UI_US: u32 = 160;
-
-/// Exclusive bidirectional digital data line. The PHY holds D+ at the SCP
-/// detection level and maps logical data onto D−. Clocks must be monotonic,
-/// drive/sample operations bounded and fast enough to resolve 40 µs sync.
-pub trait Transport {
-    type Error;
-    fn drive(&mut self, high: Option<bool>) -> Result<(), Self::Error>;
-    fn sample(&mut self) -> Result<bool, Self::Error>;
-    /// Elapsed microseconds from this probe's start. Must not wrap during
-    /// detection; a relative 32-bit clock keeps the small MCU PHY efficient.
-    fn now_us(&self) -> u32;
-    /// Wait at least `us`, without yielding during a transaction.
-    fn delay_us(&mut self, us: u32);
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum Error<E> {
-    #[error("SCP physical transport failed")]
-    Transport(E),
-    #[error("SCP timing budget exceeded")]
-    Timing,
-    #[error("SCP response timeout")]
-    Timeout,
-    #[error("SCP response ping or sync is invalid")]
-    Framing,
-    #[error("SCP response parity is invalid")]
-    Parity,
-    #[error("SCP response CRC is invalid")]
-    Crc,
-    #[error("SCP register read was rejected")]
-    Nack,
-    #[error("SCP response acknowledgement is invalid")]
-    Ack,
-    #[error("adapter did not identify as an SCP programmable source")]
-    NotScp,
-    #[error("adapter did not report FCP output voltages")]
-    NotFcp,
-}
-
-impl<E> Error<E> {
-    /// Damaged or unanswered traffic, which the terminal retries (B.3.7.1
-    /// and B.3.7.2). A NACK is a valid answer and a transport failure is the
-    /// caller's to handle.
-    fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Timing | Self::Timeout | Self::Framing | Self::Parity | Self::Crc | Self::Ack
-        )
-    }
-}
 
 /// Read-only detection and capability registers (Tables B.17–B.19;
 /// `MaxIoutExtend` only in `adapter_protocol_scp.h`). No arbitrary addresses
@@ -337,7 +281,7 @@ fn read_optional<T: Transport>(
     phy: &mut T,
     register: Register,
 ) -> Result<Option<u8>, Error<T::Error>> {
-    match wire::read(phy, register) {
+    match wire::read_address(phy, register as u8) {
         Ok(value) => Ok(Some(value)),
         Err(Error::Nack) => Ok(None),
         Err(error) => Err(error),

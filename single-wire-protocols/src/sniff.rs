@@ -5,15 +5,15 @@
 //! terminal's and the charger's clocks may differ within Table B.4.
 
 use crate::UI_US;
-use crate::control::{SHORT_OFFSET_MV, SHORT_STEP_MV, SHORT_VOLTAGE, VOLTAGE};
 use crate::fcp::{STEP_MV as FCP_STEP_MV, VOLTAGE as FCP_VOLTAGE};
+use crate::scp::control::{SHORT_OFFSET_MV, SHORT_STEP_MV, SHORT_VOLTAGE, VOLTAGE};
 use crate::wire::{
     ACK, ACK_MASK, CRC, MULTI_WRITE, NACK, PING_MAX_US, PING_MIN_US, PING_UI, READ, WRITE,
     parity_bit,
 };
 
 /// Multiple-byte register read command (`SC8545_SCP_CMD_MBRRD` in
-/// `sc8545_protocol.h`, see the crate docs). Its reply carries the data.
+/// `sc8545_protocol.h`, see [`crate::scp`]). Its reply carries the data.
 const MULTI_READ: u8 = 0x1c;
 /// Register blocks: `adapter_protocol_fcp.h` defines FCP registers below
 /// 0x70 and identification/version registers from 0x70 to 0x8b, which both
@@ -38,7 +38,7 @@ const BYTE_BITS: usize = 9;
 const BYTE_MIN_US: u32 = BYTE_BITS as u32 * PING_MIN_US / PING_UI - JITTER_US;
 const BYTE_MAX_US: u32 = BYTE_BITS as u32 * PING_MAX_US / PING_UI + JITTER_US;
 /// Most data bytes in one transaction: Huawei's `fcp_protocol_check_trans_num`
-/// accepts 1 or an even count up to 16 (crate docs' kernel commit).
+/// accepts 1 or an even count up to 16 ([`crate::scp`]'s kernel commit).
 const MAX_DATA: usize = 16;
 /// Longest packet: a multiple write's command, address, length, data and CRC.
 const MAX_PACKET: usize = 3 + MAX_DATA + 1;

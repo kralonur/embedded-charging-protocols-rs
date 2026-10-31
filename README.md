@@ -8,9 +8,9 @@ hardware registers, GPIOs, ADC measurements or storage: the physical transport
 the caller.
 
 > **Note:** USB Power Delivery (`pd-protocol`) and Quick Charge 2.0 and 3.0
-> (`qc-protocol`) are implemented, with SCP and FCP adapter identification
-> and output control (`scp-protocol`). Review the implementation and validate
-> it on your hardware before relying on it.
+> (`qc-protocol`) are implemented, with SCP, FCP and Samsung AFC adapter
+> identification and output control (`single-wire-protocols`). Review the
+> implementation and validate it on your hardware before relying on it.
 
 ## Features
 
@@ -61,11 +61,13 @@ The `qc-protocol` crate (`qc-protocol/`) provides the Quick Charge 2.0 and
   pair of measured D+/D− voltages asks for, as a charger reads it, for
   watching a device that drives Quick Charge itself.
 
-The `scp-protocol` crate provides SCP and FCP identification and output
-control:
+The `single-wire-protocols` crate (`single-wire-protocols/`) provides
+separate `scp`, `fcp` and `afc` modules over a shared caller-owned transport.
+The crate root exposes `Transport` and wire errors; `control` contains shared
+request/control errors, and `sniff` provides passive SCP/FCP decoding.
 
-- Read-only detection of whitelisted adapter-type and capability registers.
-- Explicit voltage/current output control (`control`): requests are checked
+- SCP read-only detection (`scp`): whitelisted adapter-type and capability registers.
+- Explicit voltage/current output control (`scp::control`): requests are checked
   against the adapter's ranges, steps and rated power; every write is
   acknowledged and read back, never retried; protections stay enabled and a
   finite adapter watchdog drops the output if the caller stops refreshing.
@@ -74,7 +76,13 @@ control:
   rated power, and setting one of them, written, read back, then applied.
   The adapter's latched fault flags are cleared when a session starts, then
   checked before each change and on every refresh.
-- Checked master/slave ping sequencing, source-clock synchronization,
+- Samsung AFC over the same electrical transport (`afc`), with D+ kept at
+  0.6 V: 5 V and 9 V requests using AFC-specific framing and 5–20 UI slave
+  pings. As in the reference driver, response data is skipped, not required
+  to decode as one byte. A 100-UI reset pulse supports safe shutdown; only
+  measured VBUS confirms an output or return to 5 V. Detection is not a
+  voltage/current capability report.
+- SCP/FCP master/slave ping sequencing, source-clock synchronization,
   quarter-UI framing, odd parity, CRC-8 and ACK/NACK validation.
 - Modern programmable-mode identification and the two-register legacy
   fallback. A ping alone does not establish SCP support.
@@ -88,11 +96,12 @@ control:
   voltage an accepted write requested. Damaged traffic is dropped until the
   next ping; nothing drives the line.
 - Public draft physical-layer and public driver references are cited in
-  `scp-protocol/src/lib.rs`. They are references, not certification claims.
+  `single-wire-protocols/src/scp.rs`, `fcp.rs` and `afc.rs`. They are
+  references, not certification claims.
 
 ## Limitations
 
-- **SCP and FCP are not hardware-validated.** Simulated wire tests establish encoding
+- **SCP, FCP and AFC are not hardware-validated.** Simulated wire tests establish encoding
   and failure behavior, not compatibility with a particular adapter or, for
   passive decoding, phone.
   Electrical entry, timing and default-output checks remain caller duties.
@@ -117,7 +126,7 @@ control:
 - [SOP soft reset contract](docs/PD-SOFT-RESET.md).
 - [Hard reset boundary](docs/PD-HARD-RESET.md).
 - [USB PD pin review](docs/usbpd-review.md): the reviewed `usbpd` revision.
-- [SCP and FCP caller contract](docs/scp.md): entry, transport timing, output
+- [SCP, FCP and AFC caller contract](docs/single-wire.md): entry, transport timing, output
   sessions and passive decoding.
 
 ## Build and validation

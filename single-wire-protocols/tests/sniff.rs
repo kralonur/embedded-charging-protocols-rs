@@ -1,6 +1,6 @@
 //! The passive decoder sees only bus edges built from Appendix B framing,
 //! with the terminal and charger on different clocks and jittered edges.
-use scp_protocol::sniff::{Access, Decoder, Protocol, Transaction};
+use single_wire_protocols::sniff::{Access, Decoder, Protocol, Transaction};
 
 /// Terminal and charger UIs in µs, both inside Table B.4's 144–176 µs.
 const TERMINAL_UI: u32 = 148;

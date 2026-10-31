@@ -1,8 +1,10 @@
 //! Explicit output control, separate from read-only detection.
 //! Register definitions and sequencing: Appendix B Tables B.21/B.27 and
-//! Huawei's `scp_protocol_set_init_data` / `set_default_state` (crate docs).
+//! Huawei's `scp_protocol_set_init_data` / `set_default_state` ([`crate::scp`]).
 
-use crate::{Adapter, Capabilities, Error, Modes, Transport, wire};
+use super::{Adapter, Capabilities, Modes};
+use crate::control::{ControlError, RequestError};
+use crate::{Transport, wire};
 
 /// Control/status and setpoint addresses (Appendix B Tables B.21–B.27).
 const CONTROL: u8 = 0xa0;
@@ -10,9 +12,9 @@ const TIMER: u8 = 0xa1;
 const FAULTS: u8 = 0xa3;
 const VOLTAGE_BOUND: u8 = 0xb0;
 const CURRENT_BOUND: u8 = 0xb2;
-pub(super) const VOLTAGE: u8 = 0xb8;
+pub(crate) const VOLTAGE: u8 = 0xb8;
 const CURRENT: u8 = 0xba;
-pub(super) const SHORT_VOLTAGE: u8 = 0xca;
+pub(crate) const SHORT_VOLTAGE: u8 = 0xca;
 const SHORT_CURRENT: u8 = 0xcb;
 /// Control byte 0: output on, protocol mode, D+ protection disabled,
 /// reset, ACK reporting and port-overtemperature protection, respectively.
@@ -31,24 +33,10 @@ const WATCHDOG: u8 = 4;
 const PROTECTION_FAULTS: u8 = 0x1f;
 /// Legacy one-byte voltage uses (mV - 3000) / 10, through 5500 mV;
 /// one-byte current uses mA / 50 (Huawei VSSET/ISSET definitions).
-pub(super) const SHORT_OFFSET_MV: u16 = 3_000;
+pub(crate) const SHORT_OFFSET_MV: u16 = 3_000;
 const SHORT_MAX_MV: u16 = 5_500;
-pub(super) const SHORT_STEP_MV: u16 = 10;
+pub(crate) const SHORT_STEP_MV: u16 = 10;
 const SHORT_STEP_MA: u16 = 50;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum RequestError {
-    #[error("complete SCP ratings are unavailable")]
-    MissingRatings,
-    #[error("SCP request is outside the advertised range")]
-    Range,
-    #[error("SCP request is not representable at the advertised step")]
-    Step,
-    #[error("SCP request exceeds the advertised power")]
-    Power,
-    #[error("a previous SCP procedure is still running")]
-    Busy,
-}
 
 /// Validated setpoint, not evidence that the output followed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,18 +87,6 @@ impl Output {
     pub const fn milliamps(self) -> u16 {
         self.ma
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ControlError<E> {
-    #[error("SCP control transaction failed: {0}")]
-    Wire(Error<E>),
-    #[error("invalid SCP output request: {0}")]
-    Request(RequestError),
-    #[error("SCP control readback mismatch")]
-    Readback,
-    #[error("SCP output protection or watchdog reset")]
-    Protection,
 }
 
 /// Most single-transaction steps one procedure queues: a start's control

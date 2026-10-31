@@ -1,7 +1,8 @@
-//! Appendix B physical and logical layer for one single-byte register read:
-//! pings, ¼-UI syncs, MSB-first bytes with odd parity, and CRC-8.
+//! Appendix B physical and logical layer for SCP/FCP register transactions:
+//! pings, ¼-UI syncs, MSB-first bytes with odd parity, and CRC-8. AFC only
+//! shares the bounded physical timing helpers and retry policy.
 
-use crate::{Error, Register, Transport, UI_US};
+use crate::{Error, Transport, UI_US};
 use crc::{Algorithm, Crc, NoTable};
 
 /// Appendix B.3.7.2 polynomial; zero-initialized, MSB-first CRC profile.
@@ -53,28 +54,31 @@ const TX_TOLERANCE_DIVISOR: u32 = 10;
 const SAMPLE_MAX_US: u32 = 8;
 /// Polling step in µs. Implementation choice for sub-sync edge timestamps.
 const POLL_US: u32 = 1;
-/// Attempts per register. B.3.8 retries damaged transactions at most three
-/// times; Huawei's `SC8545_SCP_RETRY_TIME` makes three attempts in total.
+/// Attempts per transaction. Huawei's `SC8545_SCP_RETRY_TIME` and Samsung's
+/// AFC `AFC_COMM_CNT` both make three attempts in total.
 const ATTEMPTS: u32 = 3;
 /// Released-bus UI before another attempt. Longer than the most a failed
 /// read can leave the charger sending: ping, low UI, three bytes with sync
 /// (9¾ UI each), end sync, ping and low UI, about 64 UI.
-const RECOVERY_UI: u32 = 100;
+pub(super) const RECOVERY_UI: u32 = 100;
 
 /// Read one register, retrying damaged or unanswered transactions.
 /// D− is released after every attempt.
-pub(super) fn read<T: Transport>(phy: &mut T, register: Register) -> Result<u8, Error<T::Error>> {
-    read_address(phy, register as u8)
+pub(super) fn read_address<T: Transport>(phy: &mut T, register: u8) -> Result<u8, Error<T::Error>> {
+    retried(phy, |phy| attempt(phy, &[READ, register], true))
 }
 
-pub(super) fn read_address<T: Transport>(phy: &mut T, register: u8) -> Result<u8, Error<T::Error>> {
+pub(super) fn retried<T: Transport, R>(
+    phy: &mut T,
+    mut attempt: impl FnMut(&mut T) -> Result<R, Error<T::Error>>,
+) -> Result<R, Error<T::Error>> {
     for _ in 1..ATTEMPTS {
-        match attempt(phy, &[READ, register], true) {
+        match attempt(phy) {
             Err(error) if error.is_retryable() => phy.delay_us(RECOVERY_UI * UI_US),
             result => return result,
         }
     }
-    attempt(phy, &[READ, register], true)
+    attempt(phy)
 }
 
 /// Control writes are never retried: a missing reply may hide an applied
@@ -94,7 +98,12 @@ pub(super) fn write<T: Transport>(
 }
 
 fn attempt<T: Transport>(phy: &mut T, command: &[u8], read: bool) -> Result<u8, Error<T::Error>> {
-    let result = transaction(phy, command, read);
+    let packet = command
+        .iter()
+        .copied()
+        .chain(core::iter::once(CRC.checksum(command)));
+    let result =
+        transaction(phy, packet, |phy, ui| receive(phy, ui, read)).and_then(|reply| reply.value());
     phy.drive(None).map_err(Error::Transport)?;
     result
 }
@@ -102,34 +111,33 @@ fn attempt<T: Transport>(phy: &mut T, command: &[u8], read: bool) -> Result<u8, 
 /// Figures B.18 and B.19: ping exchange, command, ping exchange, reply,
 /// ping exchange. A complete reply is checked only after the closing
 /// exchange, so a parity or CRC failure still leaves the bus idle.
-fn transaction<T: Transport>(
+fn transaction<T: Transport, R>(
     phy: &mut T,
-    command: &[u8],
-    read: bool,
-) -> Result<u8, Error<T::Error>> {
+    packet: impl IntoIterator<Item = u8>,
+    receive: impl FnOnce(&mut T, u32) -> Result<R, Error<T::Error>>,
+) -> Result<R, Error<T::Error>> {
     let ui = exchange_ping(phy)?;
     // The charger drives the bus low for one UI after its ping.
     phy.delay_us(ui);
-    send(phy, command)?;
+    send(phy, packet)?;
     let ui = exchange_ping(phy)?;
-    let reply = receive(phy, ui, read)?;
+    let reply = receive(phy, ui)?;
     phy.delay_us(ui);
     let ui = exchange_ping(phy)?;
     // Respect the charger's final active-low interval and idle settle.
     phy.delay_us(SETTLE_UI * ui);
-    reply.value()
+    Ok(reply)
 }
 
-/// Send the command and its CRC, ending with the sync that leads into the
-/// terminal ping (Figures B.8–B.10).
-fn send<T: Transport>(phy: &mut T, command: &[u8]) -> Result<(), Error<T::Error>> {
+/// Send the packet, ending with the sync that leads into the terminal ping
+/// (Figures B.8–B.10).
+fn send<T: Transport>(
+    phy: &mut T,
+    packet: impl IntoIterator<Item = u8>,
+) -> Result<(), Error<T::Error>> {
     // The bus is low after the charger's active-low interval.
     let mut previous = false;
-    for byte in command
-        .iter()
-        .copied()
-        .chain(core::iter::once(CRC.checksum(command)))
-    {
+    for byte in packet {
         sync(phy, previous, byte & 0x80 != 0)?;
         for bit in (0..8).rev() {
             hold(phy, byte & (1 << bit) != 0, UI_US)?;
@@ -286,7 +294,7 @@ fn receive_byte<T: Transport>(
     Ok((byte, parity))
 }
 
-fn sample<T: Transport>(phy: &mut T) -> Result<bool, Error<T::Error>> {
+pub(super) fn sample<T: Transport>(phy: &mut T) -> Result<bool, Error<T::Error>> {
     let before = phy.now_us();
     let high = phy.sample().map_err(Error::Transport)?;
     if phy.now_us().saturating_sub(before) > SAMPLE_MAX_US {
@@ -297,12 +305,13 @@ fn sample<T: Transport>(phy: &mut T) -> Result<bool, Error<T::Error>> {
 
 /// Wait for `deadline`. Arriving more than one sample late is a timing
 /// failure, never a silently shifted sample point.
-fn wait_until<T: Transport>(phy: &mut T, deadline: u32) -> Result<(), Error<T::Error>> {
-    if phy.now_us() > deadline + SAMPLE_MAX_US {
-        return Err(Error::Timing);
-    }
+pub(super) fn wait_until<T: Transport>(phy: &mut T, deadline: u32) -> Result<(), Error<T::Error>> {
     while phy.now_us() < deadline {
         phy.delay_us(POLL_US);
+    }
+    // A pause can occur inside the wait, not only before it starts.
+    if phy.now_us() > deadline + SAMPLE_MAX_US {
+        return Err(Error::Timing);
     }
     Ok(())
 }
@@ -326,7 +335,7 @@ fn wait_level<T: Transport>(
     }
 }
 
-fn hold<T: Transport>(phy: &mut T, high: bool, us: u32) -> Result<(), Error<T::Error>> {
+pub(super) fn hold<T: Transport>(phy: &mut T, high: bool, us: u32) -> Result<(), Error<T::Error>> {
     let before = phy.now_us();
     phy.drive(Some(high)).map_err(Error::Transport)?;
     phy.delay_us(us);
